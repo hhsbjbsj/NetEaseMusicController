@@ -611,6 +611,23 @@ class MusicHandler(BaseHTTPRequestHandler):
                     self.wfile.write(f.read())
                 return
 
+        # 8. 直接下载 Android 原生客户端 APK
+        if path in ("/download", "/download/apk", "/app-debug.apk"):
+            apk_path = os.path.join(BASE_DIR, "app-debug.apk")
+            if os.path.exists(apk_path):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.android.package-archive")
+                self.send_header("Content-Disposition", 'attachment; filename="NetEaseController-v2.5.0.apk"')
+                self.send_header("Content-Length", str(os.path.getsize(apk_path)))
+                self.end_headers()
+                with open(apk_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                return
+
         self.send_response(404)
         self.end_headers()
 

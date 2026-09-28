@@ -4,3 +4,9 @@ __pycache__/
 .vscode/
 .idea/
 *.log
+*.apk
+app-debug.apk
+.gradle/
+build/
+android-app/**/build/
+android-app/.gradle/

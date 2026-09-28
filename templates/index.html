@@ -615,21 +615,51 @@
     }
 
     // 轮询同步歌曲名称与状态
+    let failedCount = 0;
     function syncStatus() {
       fetch('/api/status')
-        .then(res => res.json())
+        .then(res => {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        })
         .then(data => {
+          failedCount = 0;
           updateSongTitle(data.current_song);
           if (data.play_mode) updateModeUI(data.play_mode);
-          document.getElementById('conn-text').innerText = '电脑在线 (' + data.local_ip + ')';
+          const connEl = document.getElementById('conn-text');
+          const dotEl = document.querySelector('.status-dot');
+          const badgeEl = document.querySelector('.badge-status');
+          if (connEl) connEl.innerText = '电脑在线 (' + data.local_ip + ')';
+          if (dotEl) {
+            dotEl.style.background = '#2ed573';
+            dotEl.style.boxShadow = '0 0 8px #2ed573';
+          }
+          if (badgeEl) {
+            badgeEl.style.borderColor = 'rgba(46, 213, 115, 0.3)';
+            badgeEl.style.color = '#2ed573';
+          }
         })
         .catch(() => {
-          document.getElementById('conn-text').innerText = '连接已断开';
+          failedCount++;
+          if (failedCount >= 3) {
+            const connEl = document.getElementById('conn-text');
+            const dotEl = document.querySelector('.status-dot');
+            const badgeEl = document.querySelector('.badge-status');
+            if (connEl) connEl.innerText = '连接中... (请确认电脑在线)';
+            if (dotEl) {
+              dotEl.style.background = '#ff4757';
+              dotEl.style.boxShadow = '0 0 8px #ff4757';
+            }
+            if (badgeEl) {
+              badgeEl.style.borderColor = 'rgba(255, 71, 87, 0.3)';
+              badgeEl.style.color = '#ff4757';
+            }
+          }
         });
     }
 
     syncStatus();
-    setInterval(syncStatus, 3000);
+    setInterval(syncStatus, 2500);
 
     // 注册 PWA Service Worker
     if ('serviceWorker' in navigator) {

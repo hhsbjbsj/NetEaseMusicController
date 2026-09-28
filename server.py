@@ -294,15 +294,165 @@ class MusicBox:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def get_local_ip():
+# ----------------- 智能局域网 IP 与网卡探测 -----------------
+class IP_ADDR_STRING(ctypes.Structure):
+    pass
+
+IP_ADDR_STRING._fields_ = [
+    ('Next', ctypes.POINTER(IP_ADDR_STRING)),
+    ('IpAddress', ctypes.c_char * 16),
+    ('IpMask', ctypes.c_char * 16),
+    ('Context', wintypes.DWORD)
+]
+
+MAX_ADAPTER_NAME_LENGTH = 256
+MAX_ADAPTER_DESCRIPTION_LENGTH = 128
+MAX_ADAPTER_ADDRESS_LENGTH = 8
+
+class IP_ADAPTER_INFO(ctypes.Structure):
+    pass
+
+IP_ADAPTER_INFO._fields_ = [
+    ('Next', ctypes.POINTER(IP_ADAPTER_INFO)),
+    ('ComboIndex', wintypes.DWORD),
+    ('AdapterName', ctypes.c_char * (MAX_ADAPTER_NAME_LENGTH + 4)),
+    ('Description', ctypes.c_char * (MAX_ADAPTER_DESCRIPTION_LENGTH + 4)),
+    ('AddressLength', wintypes.UINT),
+    ('Address', ctypes.c_byte * MAX_ADAPTER_ADDRESS_LENGTH),
+    ('Index', wintypes.DWORD),
+    ('Type', wintypes.UINT),
+    ('DhcpEnabled', wintypes.UINT),
+    ('CurrentIpAddress', ctypes.POINTER(IP_ADDR_STRING)),
+    ('IpAddressList', IP_ADDR_STRING),
+    ('GatewayList', IP_ADDR_STRING),
+    ('DhcpServer', IP_ADDR_STRING),
+    ('HaveWins', wintypes.BOOL),
+    ('PrimaryWinsServer', IP_ADDR_STRING),
+    ('SecondaryWinsServer', IP_ADDR_STRING),
+    ('LeaseObtained', ctypes.c_longlong),
+    ('LeaseExpires', ctypes.c_longlong)
+]
+
+def get_network_details():
+    """通过 Windows 原生 iphlpapi 获取所有网卡的物理属性、默认网关与局域网 IP"""
+    adapters = []
+    try:
+        iphlpapi = ctypes.windll.iphlpapi
+        buflen = wintypes.ULONG(0)
+        iphlpapi.GetAdaptersInfo(None, ctypes.byref(buflen))
+        if buflen.value > 0:
+            buf = ctypes.create_string_buffer(buflen.value)
+            res = iphlpapi.GetAdaptersInfo(ctypes.cast(buf, ctypes.POINTER(IP_ADAPTER_INFO)), ctypes.byref(buflen))
+            if res == 0:
+                curr = ctypes.cast(buf, ctypes.POINTER(IP_ADAPTER_INFO))
+                while curr:
+                    info = curr.contents
+                    desc = info.Description.decode('ascii', errors='ignore').strip()
+                    name = info.AdapterName.decode('ascii', errors='ignore').strip()
+
+                    ips = []
+                    ip_ptr = ctypes.pointer(info.IpAddressList)
+                    while ip_ptr:
+                        ip_val = ip_ptr.contents.IpAddress.decode('ascii', errors='ignore').strip('\x00').strip()
+                        if ip_val and ip_val != '0.0.0.0' and not ip_val.startswith('127.') and not ip_val.startswith('169.254.'):
+                            ips.append(ip_val)
+                        ip_ptr = ip_ptr.contents.Next
+
+                    gateways = []
+                    gw_ptr = ctypes.pointer(info.GatewayList)
+                    while gw_ptr:
+                        gw_val = gw_ptr.contents.IpAddress.decode('ascii', errors='ignore').strip('\x00').strip()
+                        if gw_val and gw_val != '0.0.0.0':
+                            gateways.append(gw_val)
+                        gw_ptr = gw_ptr.contents.Next
+
+                    if ips:
+                        adapters.append({
+                            'name': name,
+                            'desc': desc,
+                            'type': info.Type,
+                            'ips': ips,
+                            'gateways': gateways
+                        })
+                    curr = info.Next
+    except Exception:
+        pass
+    return adapters
+
+def get_best_lan_ip():
+    """
+    智能选择最适合手机/外部设备访问的本机局域网 IP。
+    严格排除 TUN、TAP、Karing、Tailscale 等各类 VPN / 代理虚拟网卡。
+    返回: (best_ip, adapter_desc, gateway, secondary_candidates)
+    """
+    adapters = get_network_details()
+    candidates = []
+
+    for a in adapters:
+        desc_lower = a['desc'].lower()
+        is_vpn = any(k in desc_lower for k in [
+            'tun', 'tap', 'vpn', 'karing', 'tailscale', 'wireguard',
+            'clash', 'sing-box', 'virtual', 'vmware', 'vethernet', 'hyper-v'
+        ]) or (a['type'] == 53)  # MIB_IF_TYPE_PROP_VIRTUAL
+
+        has_gw = len(a['gateways']) > 0
+
+        for ip in a['ips']:
+            score = 0
+            if has_gw:
+                score += 100
+                if ip.startswith('192.168.'):
+                    score += 50
+                elif ip.startswith('10.'):
+                    score += 20
+                elif ip.startswith('172.'):
+                    score += 20
+            else:
+                if ip.startswith('192.168.'):
+                    score += 30
+                elif ip.startswith('10.'):
+                    score += 5
+                elif ip.startswith('100.'):
+                    score -= 40
+
+            if a['type'] in (6, 71):  # Ethernet or 802.11 Wi-Fi
+                score += 40
+
+            if is_vpn:
+                score -= 150
+
+            candidates.append({
+                'ip': ip,
+                'desc': a['desc'],
+                'gateway': a['gateways'][0] if has_gw else None,
+                'score': score,
+                'is_vpn': is_vpn
+            })
+
+    candidates.sort(key=lambda x: x['score'], reverse=True)
+
+    if candidates and candidates[0]['score'] > 0:
+        best = candidates[0]
+        secondaries = [c for c in candidates[1:] if c['ip'] != best['ip']]
+        return best['ip'], best['desc'], best['gateway'], secondaries
+
+    # 降级备用
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
+        s.connect(('223.5.5.5', 80))
         ip = s.getsockname()[0]
         s.close()
-        return ip
+        return ip, "默认网络适配器", None, []
     except Exception:
-        return "127.0.0.1"
+        pass
+
+    return "127.0.0.1", "本地回环", None, []
+
+def get_local_ip():
+    """兼容旧接口调用"""
+    best_ip, _, _, _ = get_best_lan_ip()
+    return best_ip
+
 
 
 class MusicHandler(BaseHTTPRequestHandler):
@@ -458,6 +608,11 @@ class MusicHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
     port = 10010
     server_address = ("0.0.0.0", port)
     try:
@@ -468,22 +623,31 @@ def main():
         input("\n按回车键退出...")
         return
 
-    local_ip = get_local_ip()
+    best_ip, adapter_desc, gateway, secondaries = get_best_lan_ip()
     print("=" * 64)
     print("  网易云音乐遥控器（Modern v2.5 全功能旗舰版）已启动！")
-    print(f"  电脑本机IP地址 : {local_ip}")
-    print(f"  服务监听端口   : {port}")
+    print(f"  电脑局域网 IP : {best_ip}")
+    print(f"  物理网络适配器: {adapter_desc}")
+    if gateway:
+        print(f"  路由器网关    : {gateway}")
+    print(f"  服务监听端口  : {port}")
     print("-" * 64)
-    print(f"  手机浏览器访问 : http://{local_ip}:{port}")
-    print(f"  手机 APP 填写  : {local_ip}:{port}")
+    print(f"  👉 手机浏览器访问 : http://{best_ip}:{port}")
+    print(f"  👉 手机 APP 填写  : {best_ip}:{port}")
+    if secondaries:
+        print("-" * 64)
+        print("  其他网络备用地址 (如需外部/特定网络远程连接):")
+        for s in secondaries:
+            tag = "VPN/虚拟网卡" if s.get('is_vpn') else "备用网卡"
+            print(f"    * http://{s['ip']}:{port} ({s['desc']} [{tag}])")
     print("=" * 64)
     print("支持特性：")
-    print("  🎵 实时曲目追踪 (Now Playing 歌名回显)")
-    print("  🔁 播放模式支持：列表循环 / 单曲循环 / 随机播放 / 顺序播放")
-    print("  ❤️ 喜欢歌曲红心收藏 (Ctrl+Alt+L)")
-    print("  🔄 从头重播当前歌曲 (Replay from 0:00)")
-    print("  🌙 睡眠定时关机 (15/30/45/60分钟 / 取消)")
-    print("  ⚡ 双通道按键注入：网易云全局热键 + Windows多媒体硬件键")
+    print("  * 实时曲目追踪 (Now Playing 歌名回显)")
+    print("  * 播放模式支持：列表循环 / 单曲循环 / 随机播放 / 顺序播放")
+    print("  * 喜欢歌曲红心收藏 (Ctrl+Alt+L)")
+    print("  * 从头重播当前歌曲 (Replay from 0:00)")
+    print("  * 睡眠定时关机 (15/30/45/60分钟 / 取消)")
+    print("  * 双通道按键注入：网易云全局热键 + Windows多媒体硬件键")
     print("正在监听手机指令...\n")
     try:
         httpd.serve_forever()

@@ -1,0 +1,62 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x android-app/gradlew || true
+
+    - name: Build APK with Gradle
+      working-directory: android-app
+      run: gradle assembleDebug
+
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: NetEaseController-v2.5-debug
+        path: android-app/app/build/outputs/apk/debug/*.apk
+
+    - name: Create GitHub Release with APK
+      uses: softprops/action-gh-release@v2
+      if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+      with:
+        tag_name: v2.5.0
+        name: "NetEaseController v2.5.0 (Modern Android App & Server)"
+        body: |
+          ### 🎉 NetEaseMusicController v2.5.0 正式发布！
+          
+          #### 🌟 新版核心更新：
+          - 🎵 **实时曲目追踪 (Now Playing)**：手机端即时查看电脑正在播放的歌名与歌手。
+          - 🔁 **全套播放模式切换**：支持「单曲循环」、「列表循环」、「随机播放」、「顺序播放」。
+          - ❤️ **红心收藏歌曲**：一键添加当前歌曲至“我喜欢的音乐”。
+          - 🔄 **本首从头重播**：一键让当前歌曲从 0:00 重新播放。
+          - 🌙 **睡眠定时关机**：支持 15/30/45/60 分钟定时自动关机。
+          - ⚡ **现代化 Android 原生客户端**：自动记忆电脑 IP，极速无缝操控。
+          
+          #### 📥 下载安装：
+          - 下载下方的 `app-debug.apk` 安装到 Android 手机即可使用。
+        files: android-app/app/build/outputs/apk/debug/*.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,42 +1,640 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>网易云音乐切换</title>
-  <link rel="stylesheet" href="/static/bootstrap.min.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#121214">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="网易云遥控">
+  <title>网易云音乐遥控器 v2.5</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
   <style>
-    .title{
-      text-align: center;
-    }
-    .btn-list > a{
-      min-height: 5em;
-      line-height: 5em;
+    :root {
+      --bg-primary: #121214;
+      --bg-card: rgba(255, 255, 255, 0.06);
+      --bg-card-hover: rgba(255, 255, 255, 0.12);
+      --accent: #ec4141;
+      --accent-glow: rgba(236, 65, 65, 0.4);
+      --text-main: #f0f0f2;
+      --text-sub: #9e9ea7;
+      --border: rgba(255, 255, 255, 0.1);
+      --radius: 20px;
     }
 
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: radial-gradient(circle at 50% 15%, #261928 0%, #0d0c11 100%);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px 16px 40px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 440px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* 顶部导航与状态 */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 4px;
+    }
+
+    .header h1 {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .badge-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      background: rgba(46, 213, 115, 0.15);
+      border: 1px solid rgba(46, 213, 115, 0.3);
+      border-radius: 20px;
+      font-size: 12px;
+      color: #2ed573;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      background: #2ed573;
+      border-radius: 50%;
+      box-shadow: 0 0 8px #2ed573;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.3; transform: scale(0.85); }
+    }
+
+    /* 正在播放卡片 */
+    .now-playing-card {
+      background: linear-gradient(135deg, rgba(236, 65, 65, 0.15), rgba(255, 255, 255, 0.05));
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(236, 65, 65, 0.25);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+    }
+
+    .track-info {
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .track-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 3px;
+    }
+
+    .track-title {
+      font-size: 16px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: #fff;
+    }
+
+    /* 音频跳动指示器 */
+    .equalizer {
+      display: flex;
+      align-items: flex-end;
+      gap: 3px;
+      height: 22px;
+      padding: 0 4px;
+    }
+
+    .eq-bar {
+      width: 3.5px;
+      background: var(--accent);
+      border-radius: 2px;
+      animation: eqBounce 1.2s infinite ease-in-out;
+    }
+
+    .eq-bar:nth-child(1) { height: 60%; animation-delay: 0.1s; }
+    .eq-bar:nth-child(2) { height: 100%; animation-delay: 0.3s; }
+    .eq-bar:nth-child(3) { height: 40%; animation-delay: 0.2s; }
+    .eq-bar:nth-child(4) { height: 80%; animation-delay: 0.4s; }
+
+    @keyframes eqBounce {
+      0%, 100% { transform: scaleY(0.4); }
+      50% { transform: scaleY(1); }
+    }
+
+    /* 核心播放控制器卡片 */
+    .player-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 22px 20px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* 主播放按键 */
+    .main-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-around;
+      padding: 8px 0;
+    }
+
+    .btn-circle {
+      border: none;
+      outline: none;
+      background: var(--bg-card-hover);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      width: 60px;
+      height: 60px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+    }
+
+    .btn-circle:active {
+      transform: scale(0.92);
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    .btn-play {
+      width: 80px;
+      height: 80px;
+      background: linear-gradient(135deg, #ff4d4d, #ec4141);
+      color: #fff;
+      font-size: 30px;
+      box-shadow: 0 8px 24px var(--accent-glow);
+      border: none;
+    }
+
+    .btn-play:active {
+      transform: scale(0.92);
+      box-shadow: 0 4px 12px var(--accent-glow);
+    }
+
+    /* 播放模式选择器（单曲循环、列表循环、随机播放、顺序播放） */
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-sub);
+      margin-bottom: -6px;
+    }
+
+    .modes-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+
+    .btn-mode {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 4px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      color: var(--text-main);
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn-mode .icon {
+      font-size: 18px;
+    }
+
+    .btn-mode:active {
+      transform: scale(0.93);
+      background: rgba(255, 255, 255, 0.15);
+    }
+
+    .btn-mode.active {
+      background: rgba(236, 65, 65, 0.2);
+      border-color: rgba(236, 65, 65, 0.55);
+      color: #ff6b6b;
+      box-shadow: 0 0 14px rgba(236, 65, 65, 0.3);
+    }
+
+    /* 快捷功能（喜欢、从头重播） */
+    .quick-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .btn-quick {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: var(--text-main);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn-quick:active {
+      transform: scale(0.95);
+      background: rgba(255, 255, 255, 0.15);
+    }
+
+    .btn-like {
+      color: #ff5252;
+      border-color: rgba(255, 82, 82, 0.3);
+      background: rgba(255, 82, 82, 0.1);
+    }
+
+    /* 音量控制 */
+    .volume-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: rgba(0, 0, 0, 0.25);
+      padding: 10px 14px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+    }
+
+    .vol-btn {
+      background: var(--bg-card-hover);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      width: 42px;
+      height: 42px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      cursor: pointer;
+    }
+
+    .vol-btn:active {
+      transform: scale(0.92);
+    }
+
+    .vol-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-sub);
+    }
+
+    /* 睡眠关机卡片 */
+    .timer-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .timer-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .timer-buttons {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+
+    .timer-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      padding: 9px 4px;
+      border-radius: 10px;
+      font-size: 12px;
+      cursor: pointer;
+      text-align: center;
+    }
+
+    .timer-btn:active {
+      background: rgba(255, 255, 255, 0.15);
+      transform: scale(0.95);
+    }
+
+    .shutdown-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 2px;
+    }
+
+    .btn-danger {
+      flex: 1;
+      background: rgba(255, 71, 87, 0.15);
+      border: 1px solid rgba(255, 71, 87, 0.35);
+      color: #ff6b81;
+      padding: 10px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .btn-danger:active {
+      background: rgba(255, 71, 87, 0.3);
+      transform: scale(0.96);
+    }
+
+    .btn-cancel {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text-sub);
+      padding: 10px;
+      border-radius: 10px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .btn-cancel:active {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    /* 浮动提示 Toast */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      background: rgba(25, 25, 30, 0.95);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #fff;
+      padding: 10px 22px;
+      border-radius: 25px;
+      font-size: 14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      opacity: 0;
+      transform: translateY(20px);
+      transition: all 0.25s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+      pointer-events: none;
+      z-index: 1000;
+    }
+
+    #toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="col-md-12">
-      <div class="col-md-12 title">
-        <h3>买不起遥控器只能写程序</h3>
-      </div>
-      <div class="col-md-12 btn-list">
-        <a class="btn btn-lg btn-primary col-md-4" role="button" href="?action=prev_song">前一首</a>
-        <a class="btn btn-lg btn-primary col-md-4" role="button" href="?action=pause_play">暂停/播放</a>
-        <a class="btn btn-lg btn-primary col-md-4" role="button" href="?action=next_song">下一首</a>
-      </div>
-      <div class="col-md-12 btn-list">
-        <a class="btn btn-lg btn-primary col-md-4" role="button" href="?action=volume_down">音量-</a>
-        <a class="btn btn-lg btn-danger col-md-4" role="button" href="?action=shutdown">关机</a>
-        <a class="btn btn-lg btn-primary col-md-4" role="button" href="?action=volume_up">音量+</a>
-      </div>
-      <div class="col-md-12">
 
+  <div class="container">
+    <!-- 顶部状态栏 -->
+    <div class="header">
+      <h1>🎵 网易云音乐遥控器</h1>
+      <div class="badge-status">
+        <div class="status-dot"></div>
+        <span id="conn-text">电脑已连接</span>
+      </div>
+    </div>
+
+    <!-- 当前播放歌曲卡片 -->
+    <div class="now-playing-card">
+      <div class="track-info">
+        <div class="track-label">NOW PLAYING</div>
+        <div class="track-title" id="song-title">正在获取歌曲名...</div>
+      </div>
+      <div class="equalizer">
+        <div class="eq-bar"></div>
+        <div class="eq-bar"></div>
+        <div class="eq-bar"></div>
+        <div class="eq-bar"></div>
+      </div>
+    </div>
+
+    <!-- 主控面板 -->
+    <div class="player-card">
+      <!-- 上/停/下 控制 -->
+      <div class="main-controls">
+        <button class="btn-circle" onclick="doAction('prev_song', '上一首')">⏮</button>
+        <button class="btn-circle btn-play" onclick="doAction('pause_play', '播放 / 暂停')">⏯</button>
+        <button class="btn-circle" onclick="doAction('next_song', '下一首')">⏭</button>
+      </div>
+
+      <!-- 快捷动作：喜欢歌曲 & 从头重播 -->
+      <div class="quick-actions">
+        <button class="btn-quick btn-like" onclick="doAction('like_song', '❤️ 已添加到我喜欢的音乐！')">
+          <span style="font-size: 18px;">❤️</span>
+          <span>喜欢这首歌</span>
+        </button>
+        <button class="btn-quick" onclick="doAction('replay_song', '🔄 已从 0:00 重新播放当前曲目')">
+          <span style="font-size: 17px;">🔄</span>
+          <span>从头重播</span>
+        </button>
+      </div>
+
+      <!-- 播放模式选择器（单曲循环、列表循环、随机播放、顺序播放） -->
+      <div class="section-title">播放模式切换</div>
+      <div class="modes-grid">
+        <button id="mode-single_loop" class="btn-mode" onclick="setPlayMode('single_loop', '🔂 已设为【单曲循环】')">
+          <span class="icon">🔂</span>
+          <span>单曲循环</span>
+        </button>
+        <button id="mode-list_loop" class="btn-mode active" onclick="setPlayMode('list_loop', '🔁 已设为【列表循环】')">
+          <span class="icon">🔁</span>
+          <span>列表循环</span>
+        </button>
+        <button id="mode-shuffle" class="btn-mode" onclick="setPlayMode('shuffle', '🔀 已设为【随机播放】')">
+          <span class="icon">🔀</span>
+          <span>随机播放</span>
+        </button>
+        <button id="mode-sequential" class="btn-mode" onclick="setPlayMode('sequential', '➡️ 已设为【顺序播放】')">
+          <span class="icon">➡️</span>
+          <span>顺序播放</span>
+        </button>
+      </div>
+
+      <!-- 音量控制 -->
+      <div class="volume-controls">
+        <button class="vol-btn" onclick="doAction('volume_down', '🔉 音量 -')">🔉-</button>
+        <span class="vol-title">音量控制</span>
+        <button class="vol-btn" onclick="doAction('volume_mute', '🔇 静音切换')">🔇</button>
+        <button class="vol-btn" onclick="doAction('volume_up', '🔊 音量 +')">🔊+</button>
+      </div>
+    </div>
+
+    <!-- 睡眠关机设置卡片 -->
+    <div class="timer-card">
+      <div class="timer-header">
+        <span>🌙 睡眠定时关机</span>
+        <span style="font-size: 12px; color: var(--text-sub);">听歌入眠助手</span>
+      </div>
+      <div class="timer-buttons">
+        <button class="timer-btn" onclick="setTimer(15)">15分钟</button>
+        <button class="timer-btn" onclick="setTimer(30)">30分钟</button>
+        <button class="timer-btn" onclick="setTimer(45)">45分钟</button>
+        <button class="timer-btn" onclick="setTimer(60)">60分钟</button>
+      </div>
+      <div class="shutdown-actions">
+        <button class="btn-cancel" onclick="doAction('cancel_shutdown', '已取消定时关机')">取消定时</button>
+        <button class="btn-danger" onclick="confirmShutdown()">立即关机</button>
       </div>
     </div>
   </div>
 
+  <div id="toast"></div>
+
+  <script>
+    // 触觉振动反馈
+    function vibrate(ms = 35) {
+      if (navigator.vibrate) navigator.vibrate(ms);
+    }
+
+    // 浮动提示
+    function showToast(msg) {
+      const toast = document.getElementById('toast');
+      toast.innerText = msg;
+      toast.classList.add('show');
+      clearTimeout(window._toastTimer);
+      window._toastTimer = setTimeout(() => {
+        toast.classList.remove('show');
+      }, 2000);
+    }
+
+    // 执行动作
+    function doAction(actionName, toastText) {
+      vibrate(40);
+      fetch('/api/action?cmd=' + actionName)
+        .then(res => res.json())
+        .then(data => {
+          if (toastText) showToast(toastText);
+          if (data.current_song) updateSongTitle(data.current_song);
+          if (data.play_mode) updateModeUI(data.play_mode);
+        })
+        .catch(() => showToast('指令发送失败，请检查网络'));
+    }
+
+    // 切换指定播放模式
+    function setPlayMode(modeName, toastText) {
+      vibrate(45);
+      fetch('/api/action?cmd=set_mode&val=' + modeName)
+        .then(res => res.json())
+        .then(data => {
+          updateModeUI(modeName);
+          showToast(toastText);
+        })
+        .catch(() => showToast('切换模式失败'));
+    }
+
+    // 更新播放模式 UI 高亮
+    function updateModeUI(modeName) {
+      const modes = ['single_loop', 'list_loop', 'shuffle', 'sequential'];
+      modes.forEach(m => {
+        const el = document.getElementById('mode-' + m);
+        if (el) {
+          if (m === modeName) {
+            el.classList.add('active');
+          } else {
+            el.classList.remove('active');
+          }
+        }
+      });
+    }
+
+    // 更新歌曲名
+    function updateSongTitle(title) {
+      if (title && title.length > 0) {
+        document.getElementById('song-title').innerText = title;
+      }
+    }
+
+    // 定时关机
+    function setTimer(minutes) {
+      vibrate(40);
+      fetch('/api/action?cmd=schedule_shutdown&val=' + minutes)
+        .then(res => res.json())
+        .then(() => {
+          showToast(`已设置 ${minutes} 分钟后电脑自动关机`);
+        });
+    }
+
+    // 确认关机
+    function confirmShutdown() {
+      if (confirm('确定要让电脑在 5 秒后立即关机吗？')) {
+        doAction('shutdown', '电脑将在 5 秒后关机...');
+      }
+    }
+
+    // 轮询同步歌曲名称与状态
+    function syncStatus() {
+      fetch('/api/status')
+        .then(res => res.json())
+        .then(data => {
+          updateSongTitle(data.current_song);
+          if (data.play_mode) updateModeUI(data.play_mode);
+          document.getElementById('conn-text').innerText = '电脑在线 (' + data.local_ip + ')';
+        })
+        .catch(() => {
+          document.getElementById('conn-text').innerText = '连接已断开';
+        });
+    }
+
+    syncStatus();
+    setInterval(syncStatus, 3000);
+
+    // 注册 PWA Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+  </script>
 </body>
 </html>

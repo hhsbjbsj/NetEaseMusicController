@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">网易云遥控器</string>
+    <string name="set_server_title">设置电脑端服务端地址</string>
+    <string name="set_server_hint">例如: 192.168.1.6:10010</string>
+    <string name="connect">连接</string>
+    <string name="cancel">取消</string>
+</resources>

@@ -1,0 +1,18 @@
+{
+  "name": "网易云音乐遥控器",
+  "short_name": "网易云遥控",
+  "description": "躺在床上控制PC端网易云音乐播放、切歌、调音量与单曲循环",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#121214",
+  "theme_color": "#ec4141",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

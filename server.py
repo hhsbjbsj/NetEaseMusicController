@@ -20,6 +20,14 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from ctypes import wintypes
 
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(errors='replace')
+except Exception:
+    pass
+
 user32 = ctypes.windll.user32
 
 # Virtual Key Codes
@@ -632,8 +640,8 @@ def main():
         print(f"  路由器网关    : {gateway}")
     print(f"  服务监听端口  : {port}")
     print("-" * 64)
-    print(f"  👉 手机浏览器访问 : http://{best_ip}:{port}")
-    print(f"  👉 手机 APP 填写  : {best_ip}:{port}")
+    print(f"  [+] 手机浏览器访问 : http://{best_ip}:{port}")
+    print(f"  [+] 手机 APP 填写  : {best_ip}:{port}")
     if secondaries:
         print("-" * 64)
         print("  其他网络备用地址 (如需外部/特定网络远程连接):")

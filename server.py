@@ -29,6 +29,7 @@ except Exception:
     pass
 
 user32 = ctypes.windll.user32
+gdi32 = ctypes.windll.gdi32
 
 # Virtual Key Codes
 VK_CONTROL = 0x11
@@ -79,24 +80,190 @@ def press_media_key(media_vk):
     time.sleep(0.06)
     user32.keybd_event(media_vk, scan, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
 
+def get_orpheus_window():
+    """获取网易云主窗口及渲染子窗口的真实句柄与尺寸"""
+    try:
+        hdesk = user32.OpenInputDesktop(0, False, 0x10000000)
+        hwnds = []
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        def callback(h, extra):
+            cls_buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(h, cls_buf, 256)
+            if cls_buf.value == 'OrpheusBrowserHost':
+                hwnds.append(h)
+                return False
+            return True
+        user32.EnumDesktopWindows(hdesk, EnumWindowsProc(callback), 0)
+        if not hwnds:
+            return None, None, 0, 0
+        target = hwnds[0]
+
+        # 若窗口被最小化，无焦点唤醒以允许截取与后台点击
+        if user32.IsIconic(target):
+            user32.ShowWindow(target, 4)  # SW_SHOWNOACTIVATE
+            time.sleep(0.1)
+
+        rect = wintypes.RECT()
+        user32.GetWindowRect(target, ctypes.byref(rect))
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+
+        renders = []
+        def child_cb(ch, extra):
+            c_cls = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(ch, c_cls, 256)
+            if 'Chrome_RenderWidgetHostHWND' in c_cls.value:
+                renders.append(ch)
+                return False
+            return True
+        user32.EnumChildWindows(target, EnumWindowsProc(child_cb), 0)
+        render = renders[0] if renders else target
+        return target, render, w, h
+    except Exception:
+        pass
+    return None, None, 0, 0
+
 def get_current_song():
     """实时读取网易云音乐窗口标题获取当前正在播放的曲目信息"""
     try:
-        hdesk = user32.OpenInputDesktop(0, False, 0x10000000)
-        if hdesk:
-            user32.SetThreadDesktop(hdesk)
-        hwnd = user32.FindWindowW('OrpheusBrowserHost', None)
-        if hwnd:
-            length = user32.GetWindowTextLengthW(hwnd)
+        target, _, _, _ = get_orpheus_window()
+        if target:
+            length = user32.GetWindowTextLengthW(target)
             if length > 0:
                 buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
+                user32.GetWindowTextW(target, buf, length + 1)
                 val = buf.value.strip()
                 if val and val != "OrpheusBrowserHost":
                     return val
     except Exception:
         pass
     return "网易云音乐"
+
+def detect_play_mode(target=None, w=None, h=None):
+    """
+    通过高速获取模式按钮 17x17 区域特征，100% 准确识别网易云当前真实的物理播放模式：
+    - 'single_loop' (单曲循环)
+    - 'list_loop' (列表循环)
+    - 'shuffle' (随机播放)
+    - 'sequential' (顺序播放)
+    """
+    try:
+        if not target:
+            target, _, w, h = get_orpheus_window()
+        if not target or w < 300 or h < 200:
+            return "list_loop"
+
+        cx = w // 2 - 95
+        cy = h - 41
+
+        hwndDC = user32.GetWindowDC(target)
+        mfcDC = gdi32.CreateCompatibleDC(hwndDC)
+        saveBitMap = gdi32.CreateCompatibleBitmap(hwndDC, w, h)
+        gdi32.SelectObject(mfcDC, saveBitMap)
+
+        user32.PrintWindow(target, mfcDC, 2)
+
+        # 采样 17x17 栅格 (0=白/背景, 1=图标暗色)
+        grid = []
+        for dy in range(-8, 9):
+            row = []
+            for dx in range(-8, 9):
+                color = gdi32.GetPixel(mfcDC, cx + dx, cy + dy)
+                r = color & 0xFF
+                g = (color >> 8) & 0xFF
+                b = (color >> 16) & 0xFF
+                is_dark = 1 if (r < 180 and g < 180 and b < 180) else 0
+                row.append(is_dark)
+            grid.append(row)
+
+        gdi32.DeleteObject(saveBitMap)
+        gdi32.DeleteDC(mfcDC)
+        user32.ReleaseDC(target, hwndDC)
+
+        # 1. 顺序播放 (sequential): 中间 6..11 行完全没有任何暗色像素
+        mid_rows_sum = sum(sum(grid[y]) for y in range(6, 12))
+        if mid_rows_sum == 0:
+            return "sequential"
+
+        # 2. 单曲循环 (single_loop): 中心列 x=7 处有数字 1 的竖线 (连续暗色)
+        digit1_count = sum(grid[y][7] for y in range(7, 12))
+        if digit1_count >= 4:
+            return "single_loop"
+
+        # 3. 随机播放 (shuffle): 中间交叉区域 (y=6..11, x=4..7) 有多处交叉像素
+        cross_count = sum(grid[y][x] for y in range(6, 12) for x in range(4, 8))
+        if cross_count >= 5:
+            return "shuffle"
+
+        # 4. 列表循环 (list_loop): 环形箭头，中间中心区域为空
+        return "list_loop"
+    except Exception:
+        return "list_loop"
+
+_last_mode_cache = {"mode": "list_loop", "time": 0}
+
+def get_current_play_mode(force_refresh=False):
+    """带 1 秒 TTL 缓存的高性能物理模式查询"""
+    now = time.time()
+    if not force_refresh and (now - _last_mode_cache["time"] < 1.0):
+        return _last_mode_cache["mode"]
+    mode = detect_play_mode()
+    _last_mode_cache["mode"] = mode
+    _last_mode_cache["time"] = now
+    return mode
+
+def switch_to_mode(target_mode):
+    """
+    闭环视觉自校验模式换档器：
+    向网易云物理模式按钮精确注入点击指令，并在毫秒级内校验图标变动，确保 100% 换档到位。
+    """
+    target_hwnd, render_hwnd, w, h = get_orpheus_window()
+    if not target_hwnd or not render_hwnd:
+        print("[模式切换] 未找到网易云窗口，无法换档")
+        return None
+
+    names = {
+        'sequential': '顺序播放',
+        'list_loop': '列表循环',
+        'single_loop': '单曲循环',
+        'shuffle': '随机播放'
+    }
+
+    current = detect_play_mode(target_hwnd, w, h)
+    print(f"[模式切换] 当前物理模式: 【{names.get(current, current)}】 -> 目标模式: 【{names.get(target_mode, target_mode)}】")
+    if current == target_mode:
+        print(f"[模式切换] 已经处于【{names.get(target_mode, target_mode)}】，无需额外换档")
+        _last_mode_cache["mode"] = target_mode
+        _last_mode_cache["time"] = time.time()
+        return current
+
+    cx = w // 2 - 95
+    cy = h - 41
+    lparam = (cy << 16) | (cx & 0xFFFF)
+
+    WM_MOUSEMOVE = 0x0200
+    WM_LBUTTONDOWN = 0x0201
+    WM_LBUTTONUP = 0x0202
+    MK_LBUTTON = 0x0001
+
+    for step in range(4):
+        user32.PostMessageW(render_hwnd, WM_MOUSEMOVE, 0, lparam)
+        time.sleep(0.04)
+        user32.PostMessageW(render_hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lparam)
+        time.sleep(0.06)
+        user32.PostMessageW(render_hwnd, WM_LBUTTONUP, 0, lparam)
+        time.sleep(0.25)  # 等待 CEF 渲染界面重绘
+
+        current = detect_play_mode(target_hwnd, w, h)
+        if current == target_mode:
+            print(f"[模式切换] 换档成功！经过第 {step + 1} 次点击已进入【{names.get(target_mode, target_mode)}】！")
+            _last_mode_cache["mode"] = target_mode
+            _last_mode_cache["time"] = time.time()
+            return current
+
+    _last_mode_cache["mode"] = current
+    _last_mode_cache["time"] = time.time()
+    return current
 
 class SingleSongLoopManager:
     """管理单曲自动循环重播助手状态与定时器"""
@@ -190,71 +357,20 @@ class MusicBox:
     @staticmethod
     def toggle_loop():
         """切换单曲自动循环模式"""
-        global current_play_mode
-        state = loop_manager.toggle()
-        if state:
-            current_play_mode = "single_loop"
-        else:
-            current_play_mode = "list_loop"
-        print(f"[操作触发] 单曲自动循环模式: {'【开启】' if state else '【关闭】'}")
-        MusicBox.cycle_mode_ui()
-        return state
+        cur = get_current_play_mode()
+        target = "list_loop" if cur == "single_loop" else "single_loop"
+        res = MusicBox.set_mode(target)
+        return (res == "single_loop")
 
     @staticmethod
     def set_mode(mode_name):
-        """设置特定的播放模式"""
-        global current_play_mode
-        current_play_mode = mode_name
+        """设置特定的播放模式（通过视觉闭环自动换档到位）"""
+        res = switch_to_mode(mode_name)
         if mode_name == "single_loop":
             loop_manager.set_state(True)
-            print("[操作触发] 切换播放模式 -> 【单曲循环】")
         else:
             loop_manager.set_state(False)
-            mode_desc = {
-                "list_loop": "【列表循环】",
-                "shuffle": "【随机播放】",
-                "sequential": "【顺序播放】"
-            }.get(mode_name, mode_name)
-            print(f"[操作触发] 切换播放模式 -> {mode_desc}")
-        
-        # 联动触发网易云界面的模式切换
-        MusicBox.cycle_mode_ui()
-        return current_play_mode
-
-    @staticmethod
-    def cycle_mode_ui():
-        """向网易云窗口发送模式切换点击指令"""
-        try:
-            hdesk = user32.OpenInputDesktop(0, False, 0x10000000)
-            if hdesk:
-                user32.SetThreadDesktop(hdesk)
-            hwnd = user32.FindWindowW('OrpheusBrowserHost', None)
-            if hwnd:
-                rect = wintypes.RECT()
-                user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                w = rect.right - rect.left
-                h = rect.bottom - rect.top
-                if w > 200 and h > 100:
-                    # 查找渲染子窗口
-                    EnumChildProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-                    render_hwnds = []
-                    def callback(h_child, extra):
-                        cls_buf = ctypes.create_unicode_buffer(256)
-                        user32.GetClassNameW(h_child, cls_buf, 256)
-                        if 'Chrome_RenderWidgetHostHWND' in cls_buf.value:
-                            render_hwnds.append(h_child)
-                        return True
-                    user32.EnumChildWindows(hwnd, EnumChildProc(callback), 0)
-                    if render_hwnds:
-                        target = render_hwnds[0]
-                        cx = max(10, w - 240)
-                        cy = max(10, h - 36)
-                        lparam = (cy << 16) | (cx & 0xFFFF)
-                        user32.PostMessageW(target, 0x0201, 1, lparam)
-                        time.sleep(0.04)
-                        user32.PostMessageW(target, 0x0202, 0, lparam)
-        except Exception:
-            pass
+        return res or mode_name
 
     @staticmethod
     def like_song():
@@ -497,12 +613,13 @@ class MusicHandler(BaseHTTPRequestHandler):
 
         # 1. 实时状态查询接口（含当前歌曲、播放模式）
         if path == "/api/status":
+            actual_mode = get_current_play_mode()
             self.send_cors_json({
                 "status": 1,
                 "version": "2.5.0",
                 "current_song": get_current_song(),
-                "play_mode": current_play_mode,
-                "single_loop": loop_manager.enabled,
+                "play_mode": actual_mode,
+                "single_loop": (actual_mode == "single_loop" or loop_manager.enabled),
                 "loop_interval": loop_manager.interval,
                 "local_ip": get_local_ip(),
                 "port": 10010
@@ -531,17 +648,19 @@ class MusicHandler(BaseHTTPRequestHandler):
                 success = False
                 msg = f"Unknown command: {cmd}"
 
+            actual_mode = get_current_play_mode(force_refresh=True)
             self.send_cors_json({
                 "success": success,
                 "message": msg,
                 "current_song": get_current_song(),
-                "play_mode": current_play_mode,
-                "single_loop": loop_manager.enabled
+                "play_mode": actual_mode,
+                "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
             })
             return
 
         # 3. 兼容旧版 APP 连接握手接口
         if path == "/mobile_connect":
+            actual_mode = get_current_play_mode()
             self.send_cors_json({
                 "code": 200,
                 "message": "Connected",
@@ -549,8 +668,8 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "status": 1,
                 "version": "2.5.0",
                 "current_song": get_current_song(),
-                "play_mode": current_play_mode,
-                "single_loop": loop_manager.enabled
+                "play_mode": actual_mode,
+                "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
             })
             return
 

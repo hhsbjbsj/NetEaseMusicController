@@ -639,7 +639,7 @@
           <span class="vol-percent-badge" id="vol-percent-badge">100%</span>
         </div>
         <div class="vol-slider-wrap">
-          <input type="range" id="vol-slider" class="vol-slider" min="0" max="100" value="100" oninput="onVolumeSliderInput(this.value)" onchange="onVolumeSliderChange(this.value)">
+          <input type="range" id="vol-slider" class="vol-slider" min="0" max="100" value="100" oninput="onVolumeSliderInput(this.value)" onchange="onVolumeSliderCommit(this.value)" onmouseup="onVolumeSliderCommit(this.value)" ontouchend="onVolumeSliderCommit(this.value)">
         </div>
         <div class="vol-actions">
           <button class="vol-step-btn" onclick="adjustVolume(-5)">🔉 -5%</button>
@@ -986,6 +986,16 @@
         badge.innerText = val + '%';
         badge.classList.remove('muted');
       }
+    }
+
+    let _lastCommitTime = 0;
+    let _lastCommitVal = -1;
+    function onVolumeSliderCommit(val) {
+      const now = Date.now();
+      if (now - _lastCommitTime < 250 && _lastCommitVal === val) return;
+      _lastCommitTime = now;
+      _lastCommitVal = val;
+      onVolumeSliderChange(val);
     }
 
     function onVolumeSliderChange(val) {

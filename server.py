@@ -87,6 +87,189 @@ def press_clean_media_key(vk):
     time.sleep(0.04)
     user32.keybd_event(vk, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
 
+# ----------------- Windows CoreAudio (WASAPI) 真实系统硬件级主音量与静音控制 -----------------
+import comtypes
+from comtypes import GUID, IUnknown, COMMETHOD, HRESULT, CoCreateInstance, CLSCTX_INPROC_SERVER
+
+CLSID_MMDeviceEnumerator = GUID('{BCDE0395-E52F-467C-8E3D-C4579291692E}')
+
+class IMMDevice(IUnknown):
+    _iid_ = GUID('{D666063F-1587-4E43-81F1-B948E807363F}')
+    _methods_ = [
+        COMMETHOD([], HRESULT, 'Activate',
+                  (['in'], ctypes.POINTER(GUID), 'iid'),
+                  (['in'], wintypes.DWORD, 'dwClsCtx'),
+                  (['in'], ctypes.c_void_p, 'pActivationParams'),
+                  (['out'], ctypes.POINTER(ctypes.POINTER(IUnknown)), 'ppInterface')),
+        COMMETHOD([], HRESULT, 'OpenPropertyStore'),
+        COMMETHOD([], HRESULT, 'GetId', (['out'], ctypes.POINTER(wintypes.LPWSTR), 'ppstrId'))
+    ]
+
+class IMMDeviceCollection(IUnknown):
+    _iid_ = GUID('{0BD7A1BE-7A1A-44DB-8397-CC5392387B5E}')
+    _methods_ = [
+        COMMETHOD([], HRESULT, 'GetCount',
+                  (['out'], ctypes.POINTER(wintypes.UINT), 'pcDevices')),
+        COMMETHOD([], HRESULT, 'Item',
+                  (['in'], wintypes.UINT, 'nDevice'),
+                  (['out'], ctypes.POINTER(ctypes.POINTER(IMMDevice)), 'ppDevice'))
+    ]
+
+class IAudioEndpointVolume(IUnknown):
+    _iid_ = GUID('{5CDF2C82-841E-4546-9722-0CF74078229A}')
+    _methods_ = [
+        COMMETHOD([], HRESULT, 'RegisterControlChangeNotify'),
+        COMMETHOD([], HRESULT, 'UnregisterControlChangeNotify'),
+        COMMETHOD([], HRESULT, 'GetChannelCount', (['out'], ctypes.POINTER(wintypes.UINT), 'pnChannelCount')),
+        COMMETHOD([], HRESULT, 'SetMasterVolumeLevel'),
+        COMMETHOD([], HRESULT, 'SetMasterVolumeLevelScalar', (['in'], ctypes.c_float, 'fLevel'), (['in'], ctypes.c_void_p, 'pguidEventContext')),
+        COMMETHOD([], HRESULT, 'GetMasterVolumeLevel'),
+        COMMETHOD([], HRESULT, 'GetMasterVolumeLevelScalar', (['out'], ctypes.POINTER(ctypes.c_float), 'pfLevel')),
+        COMMETHOD([], HRESULT, 'SetChannelVolumeLevel'),
+        COMMETHOD([], HRESULT, 'SetChannelVolumeLevelScalar'),
+        COMMETHOD([], HRESULT, 'GetChannelVolumeLevel'),
+        COMMETHOD([], HRESULT, 'GetChannelVolumeLevelScalar'),
+        COMMETHOD([], HRESULT, 'SetMute', (['in'], wintypes.BOOL, 'bMute'), (['in'], ctypes.c_void_p, 'pguidEventContext')),
+        COMMETHOD([], HRESULT, 'GetMute', (['out'], ctypes.POINTER(wintypes.BOOL), 'pbMute')),
+        COMMETHOD([], HRESULT, 'GetVolumeStepInfo'),
+        COMMETHOD([], HRESULT, 'VolumeStepUp'),
+        COMMETHOD([], HRESULT, 'VolumeStepDown'),
+        COMMETHOD([], HRESULT, 'QueryHardwareSupport'),
+        COMMETHOD([], HRESULT, 'GetVolumeRange')
+    ]
+
+class IMMDeviceEnumerator(IUnknown):
+    _iid_ = GUID('{A95664D2-9614-4F35-A746-DE8DB63617E6}')
+    _methods_ = [
+        COMMETHOD([], HRESULT, 'EnumAudioEndpoints',
+                  (['in'], wintypes.DWORD, 'dataFlow'),
+                  (['in'], wintypes.DWORD, 'dwStateMask'),
+                  (['out'], ctypes.POINTER(ctypes.POINTER(IMMDeviceCollection)), 'ppDevices')),
+        COMMETHOD([], HRESULT, 'GetDefaultAudioEndpoint',
+                  (['in'], wintypes.DWORD, 'dataFlow'),
+                  (['in'], wintypes.DWORD, 'role'),
+                  (['out'], ctypes.POINTER(ctypes.POINTER(IMMDevice)), 'ppEndpoint'))
+    ]
+
+def get_real_master_volume():
+    """获取当前系统默认输出端点的真实硬件主音量百分比 (0-100)"""
+    try:
+        comtypes.CoInitialize()
+        try:
+            enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_INPROC_SERVER)
+            dev = enumerator.GetDefaultAudioEndpoint(0, 1) # eRender=0, eMultimedia=1
+            vol_ptr = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
+            ep = ctypes.cast(vol_ptr, ctypes.POINTER(IAudioEndpointVolume))
+            level = ep.GetMasterVolumeLevelScalar()
+            return max(0, min(100, round(level * 100)))
+        finally:
+            comtypes.CoUninitialize()
+    except Exception as e:
+        return _volume_state.get("volume", 80)
+
+def set_real_master_volume(pct):
+    """
+    向 Windows 默认音频端点及所有处于活动状态的输出设备（扬声器、耳机、VoiceMeeter 等）
+    同步写入真实硬件级主音量 (0-100)
+    """
+    pct = max(0, min(100, int(pct)))
+    scalar = float(pct) / 100.0
+    try:
+        comtypes.CoInitialize()
+        try:
+            enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_INPROC_SERVER)
+            # 1. 遍历并设定所有活跃渲染设备 (DEVICE_STATE_ACTIVE = 1)
+            try:
+                col = enumerator.EnumAudioEndpoints(0, 1)
+                count = col.GetCount()
+                for i in range(count):
+                    try:
+                        d = col.Item(i)
+                        v_ptr = d.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
+                        ep = ctypes.cast(v_ptr, ctypes.POINTER(IAudioEndpointVolume))
+                        ep.SetMasterVolumeLevelScalar(scalar, None)
+                        if pct > 0:
+                            ep.SetMute(False, None)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # 2. 确保默认多媒体端点精准写入
+            try:
+                def_dev = enumerator.GetDefaultAudioEndpoint(0, 1)
+                v_ptr = def_dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
+                ep = ctypes.cast(v_ptr, ctypes.POINTER(IAudioEndpointVolume))
+                ep.SetMasterVolumeLevelScalar(scalar, None)
+                if pct > 0:
+                    ep.SetMute(False, None)
+            except Exception:
+                pass
+        finally:
+            comtypes.CoUninitialize()
+    except Exception as e:
+        print(f"[WASAPI] 写入主音量异常: {e}")
+
+    # 兜底联动写入 waveOut
+    try:
+        set_sys_wave_volume(pct)
+    except Exception:
+        pass
+
+    _volume_state["volume"] = pct
+    if pct > 0:
+        _volume_state["is_muted"] = False
+    return pct
+
+def set_real_master_mute(mute_bool):
+    """向所有活动音频设备下发系统底层真实静音/解静音指令"""
+    mute_bool = bool(mute_bool)
+    try:
+        comtypes.CoInitialize()
+        try:
+            enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_INPROC_SERVER)
+            try:
+                col = enumerator.EnumAudioEndpoints(0, 1)
+                count = col.GetCount()
+                for i in range(count):
+                    try:
+                        d = col.Item(i)
+                        v_ptr = d.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
+                        ep = ctypes.cast(v_ptr, ctypes.POINTER(IAudioEndpointVolume))
+                        ep.SetMute(mute_bool, None)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                def_dev = enumerator.GetDefaultAudioEndpoint(0, 1)
+                v_ptr = def_dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
+                ep = ctypes.cast(v_ptr, ctypes.POINTER(IAudioEndpointVolume))
+                ep.SetMute(mute_bool, None)
+            except Exception:
+                pass
+        finally:
+            comtypes.CoUninitialize()
+    except Exception as e:
+        print(f"[WASAPI] 设置静音异常: {e}")
+
+    _volume_state["is_muted"] = mute_bool
+    return mute_bool
+
+def get_real_master_mute():
+    """获取 Windows 默认音频端点当前的静音状态"""
+    try:
+        comtypes.CoInitialize()
+        try:
+            enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_INPROC_SERVER)
+            def_dev = enumerator.GetDefaultAudioEndpoint(0, 1)
+            v_ptr = def_dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
+            ep = ctypes.cast(v_ptr, ctypes.POINTER(IAudioEndpointVolume))
+            return bool(ep.GetMute())
+        finally:
+            comtypes.CoUninitialize()
+    except Exception:
+        return _volume_state.get("is_muted", False)
+
 def get_sys_wave_volume():
     """获取系统 WaveOut 底层音量百分比 (0-100)"""
     try:
@@ -113,9 +296,9 @@ def set_sys_wave_volume(pct):
     return pct
 
 _volume_state = {
-    "volume": get_sys_wave_volume(),
-    "is_muted": False,
-    "last_vol": get_sys_wave_volume() or 100
+    "volume": get_real_master_volume(),
+    "is_muted": get_real_master_mute(),
+    "last_vol": get_real_master_volume() or 80
 }
 
 _last_mute_cache = {"is_muted": False, "time": 0}
@@ -811,66 +994,59 @@ class MusicBox:
 
     @staticmethod
     def volume_mute():
-        """静音切换（网易云底栏喇叭物理静音 + 系统底层 WaveOut 音量双通道联动）"""
+        """静音切换（网易云底栏喇叭物理静音 + Windows CoreAudio 真实主静音双重联动）"""
         print("[操作触发] 静音切换 (Mute Toggle)")
         target, render, w, h = get_orpheus_window()
-        cur_muted = is_audio_muted(target, w, h)
+        cur_muted = (is_audio_muted(target, w, h, force_refresh=True) or get_real_master_mute() or _volume_state.get("is_muted", False))
+        target_muted = not cur_muted
 
         # 1. 物理点击网易云底栏喇叭图标翻转静音
         if target and render:
             click_cef_button(w - 82, h - 41)
-            time.sleep(0.35)
-            new_muted = is_audio_muted(target, w, h)
+            time.sleep(0.20)
+            is_audio_muted(target, w, h, force_refresh=True)
+
+        # 2. Windows WASAPI 系统真实硬件静音全端点同步
+        set_real_master_mute(target_muted)
+
+        # 3. 记录与恢复最后音量
+        if target_muted:
+            _volume_state["last_vol"] = get_real_master_volume() or _volume_state.get("volume", 80)
         else:
-            new_muted = not cur_muted
+            last = _volume_state.get("last_vol", 80) or 80
+            set_real_master_volume(last)
 
-        # 2. Windows WaveOut 音量联动
-        if new_muted:
-            _volume_state["last_vol"] = _volume_state.get("volume", 100) or 100
-            set_sys_wave_volume(0)
-        else:
-            last = _volume_state.get("last_vol", 100) or 80
-            set_sys_wave_volume(last)
-            _volume_state["volume"] = last
-
-        # 3. 广播纯净 Windows 硬件静音按键
-        press_clean_media_key(VK_VOLUME_MUTE)
-
-        _volume_state["is_muted"] = new_muted
-        print(f"[静音结果] 状态: {'已静音' if new_muted else '已取消静音'}")
-        return new_muted
+        _volume_state["is_muted"] = target_muted
+        print(f"[静音结果] 状态: {'已静音' if target_muted else '已取消静音'}")
+        return target_muted
 
     @staticmethod
     def volume_up(step=5):
-        """音量+（调大音量并自动解除静音）"""
+        """音量+（调大真实主音量并自动解除静音）"""
         target, render, w, h = get_orpheus_window()
         if is_audio_muted(target, w, h, force_refresh=True):
             if target and render:
                 click_cef_button(w - 82, h - 41)
-                time.sleep(0.2)
+                time.sleep(0.15)
 
-        cur_vol = _volume_state.get("volume", get_sys_wave_volume())
+        set_real_master_mute(False)
+
+        cur_vol = get_real_master_volume()
         new_vol = min(100, cur_vol + step)
-        _volume_state["volume"] = new_vol
-        _volume_state["is_muted"] = False
-
-        set_sys_wave_volume(new_vol)
-        press_clean_media_key(VK_VOLUME_UP)
+        set_real_master_volume(new_vol)
         print(f"[操作触发] 音量+ (Volume Up) -> {new_vol}%")
         return new_vol
 
     @staticmethod
     def volume_down(step=5):
-        """音量-（调小音量）"""
+        """音量-（调小真实主音量）"""
         target, render, w, h = get_orpheus_window()
-        cur_vol = _volume_state.get("volume", get_sys_wave_volume())
+        cur_vol = get_real_master_volume()
         new_vol = max(0, cur_vol - step)
-        _volume_state["volume"] = new_vol
-
-        set_sys_wave_volume(new_vol)
-        press_clean_media_key(VK_VOLUME_DOWN)
 
         if new_vol == 0:
+            set_real_master_volume(0)
+            set_real_master_mute(True)
             if not is_audio_muted(target, w, h, force_refresh=True):
                 if target and render:
                     click_cef_button(w - 82, h - 41)
@@ -879,7 +1055,9 @@ class MusicBox:
             if is_audio_muted(target, w, h, force_refresh=True):
                 if target and render:
                     click_cef_button(w - 82, h - 41)
-                    time.sleep(0.2)
+                    time.sleep(0.15)
+            set_real_master_mute(False)
+            set_real_master_volume(new_vol)
             _volume_state["is_muted"] = False
 
         print(f"[操作触发] 音量- (Volume Down) -> {new_vol}%")
@@ -895,18 +1073,22 @@ class MusicBox:
         val = max(0, min(100, val))
         target, render, w, h = get_orpheus_window()
 
-        if val > 0 and is_audio_muted(target, w, h, force_refresh=True):
-            if target and render:
-                click_cef_button(w - 82, h - 41)
-                time.sleep(0.2)
-        elif val == 0 and not is_audio_muted(target, w, h, force_refresh=True):
-            if target and render:
-                click_cef_button(w - 82, h - 41)
-                time.sleep(0.2)
+        if val > 0:
+            if is_audio_muted(target, w, h, force_refresh=True):
+                if target and render:
+                    click_cef_button(w - 82, h - 41)
+                    time.sleep(0.15)
+            set_real_master_mute(False)
+            set_real_master_volume(val)
+            _volume_state["is_muted"] = False
+        else:
+            set_real_master_volume(0)
+            set_real_master_mute(True)
+            if not is_audio_muted(target, w, h, force_refresh=True):
+                if target and render:
+                    click_cef_button(w - 82, h - 41)
+            _volume_state["is_muted"] = True
 
-        _volume_state["volume"] = val
-        _volume_state["is_muted"] = (val == 0)
-        set_sys_wave_volume(val)
         print(f"[操作触发] 设定音量为: {val}%")
         return val
 
@@ -1143,8 +1325,8 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "play_mode": actual_mode,
                 "is_playing": is_playing(),
                 "is_liked": is_song_liked(),
-                "volume": _volume_state.get("volume", 100),
-                "is_muted": is_audio_muted(),
+                "volume": get_real_master_volume(),
+                "is_muted": (is_audio_muted() or get_real_master_mute() or _volume_state.get("is_muted", False)),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled),
                 "loop_interval": loop_manager.interval,
                 "local_ip": get_local_ip(),
@@ -1172,7 +1354,7 @@ class MusicHandler(BaseHTTPRequestHandler):
                         "play_mode": actual_mode,
                         "is_playing": is_playing(),
                         "is_liked": is_song_liked(),
-                        "volume": _volume_state.get("volume", 100),
+                        "volume": get_real_master_volume(),
                         "is_muted": _volume_state.get("is_muted", False),
                         "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
                     })
@@ -1211,7 +1393,7 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "play_mode": actual_mode,
                 "is_playing": is_playing(),
                 "is_liked": is_song_liked(force_refresh=(cmd == "like_song")),
-                "volume": _volume_state.get("volume", 100),
+                "volume": get_real_master_volume(),
                 "is_muted": _volume_state.get("is_muted", False),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
             })
@@ -1230,8 +1412,8 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "play_mode": actual_mode,
                 "is_playing": is_playing(),
                 "is_liked": is_song_liked(),
-                "volume": _volume_state.get("volume", 100),
-                "is_muted": is_audio_muted(),
+                "volume": get_real_master_volume(),
+                "is_muted": (is_audio_muted() or get_real_master_mute() or _volume_state.get("is_muted", False)),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
             })
             return

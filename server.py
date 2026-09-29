@@ -285,14 +285,138 @@ def click_cef_button(cx, cy):
             WM_LBUTTONUP = 0x0202
             MK_LBUTTON = 0x0001
             user32.PostMessageW(render_hwnd, WM_MOUSEMOVE, 0, lparam)
-            time.sleep(0.03)
+            time.sleep(0.04)
             user32.PostMessageW(render_hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lparam)
-            time.sleep(0.05)
+            time.sleep(0.06)
             user32.PostMessageW(render_hwnd, WM_LBUTTONUP, 0, lparam)
             return True
     except Exception:
         pass
     return False
+
+_last_liked_cache = {"is_liked": False, "time": 0, "song": ""}
+
+def locate_heart_button(target=None, w=None, h=None):
+    """
+    通过像素扫描毫秒级精准定位网易云底栏红心收藏按钮的物理坐标与喜欢状态：
+    - 返回: (cx, cy, is_liked)
+    - 智能兼容：浅色主题、深色沉浸歌词页、任意歌曲名长度、VIP角标、评语角标
+    """
+    try:
+        if not target:
+            target, _, w, h = get_orpheus_window()
+        if not target or w < 300 or h < 200:
+            return 250, (h - 41) if h else 711, False
+
+        hwndDC = user32.GetWindowDC(target)
+        mfcDC = gdi32.CreateCompatibleDC(hwndDC)
+        saveBitMap = gdi32.CreateCompatibleBitmap(hwndDC, w, h)
+        gdi32.SelectObject(mfcDC, saveBitMap)
+        user32.PrintWindow(target, mfcDC, 2)
+
+        # 1. 检测是否已红心收藏（已喜欢状态）
+        # 粗扫：以步长 2 高速侦测是否存在高饱和度红色像素团
+        red_pts = []
+        for y in range(h - 52, h - 30, 2):
+            for x in range(140, min(w, 420), 2):
+                c = gdi32.GetPixel(mfcDC, x, y)
+                r = c & 0xFF
+                g = (c >> 8) & 0xFF
+                b = (c >> 16) & 0xFF
+                if r > 190 and g < 100 and b < 100:
+                    red_pts.append((x, y))
+
+        if len(red_pts) >= 10:
+            # 细扫聚类：精确计算红心中心，排除 VIP/角标小噪点
+            min_rx = max(140, min(p[0] for p in red_pts) - 10)
+            max_rx = min(w, max(p[0] for p in red_pts) + 10)
+            all_red = []
+            for y in range(h - 55, h - 25):
+                for x in range(min_rx, max_rx):
+                    c = gdi32.GetPixel(mfcDC, x, y)
+                    r = c & 0xFF
+                    g = (c >> 8) & 0xFF
+                    b = (c >> 16) & 0xFF
+                    if r > 190 and g < 100 and b < 100:
+                        all_red.append((x, y))
+            if len(all_red) >= 40:
+                xs = [p[0] for p in all_red]
+                ys = [p[1] for p in all_red]
+                cx = (min(xs) + max(xs)) // 2
+                cy = (min(ys) + max(ys)) // 2
+                gdi32.DeleteObject(saveBitMap)
+                gdi32.DeleteDC(mfcDC)
+                user32.ReleaseDC(target, hwndDC)
+                return cx, cy, True
+
+        # 2. 未收藏状态：特征模板扫描定位空心心形轮廓
+        y_tip = h - 32
+        # 在底栏安全空白区采样背景底色（防误判深/浅色模式）
+        bg_color = gdi32.GetPixel(mfcDC, 20, h - 15)
+        bg_r = bg_color & 0xFF
+        is_dark = (bg_r < 100)
+
+        def is_outline(x, y):
+            c = gdi32.GetPixel(mfcDC, x, y)
+            r = c & 0xFF
+            return (r > 60) if is_dark else (r < 215)
+
+        def is_bg(x, y):
+            return not is_outline(x, y)
+
+        best_score = 0
+        best_x = 250
+
+        for x in range(150, min(w - 20, 420)):
+            # 快速剪枝：心形底尖 y_tip 必须为轮廓像素
+            if not is_outline(x, y_tip):
+                continue
+
+            score = 2
+            # 向上中轴必须为空心背景
+            if is_bg(x, y_tip - 1): score += 2
+            if is_bg(x, y_tip - 2): score += 2
+            if is_bg(x, y_tip - 3): score += 2
+            if is_bg(x, y_tip - 4): score += 2
+            if is_bg(x, y_tip - 5): score += 2
+            if is_bg(x, y_tip - 6): score += 2
+
+            # 两侧对称 V 型轮廓展开校验
+            if is_outline(x - 3, y_tip - 1) or is_outline(x - 2, y_tip - 1): score += 2
+            if is_outline(x + 2, y_tip - 1) or is_outline(x + 3, y_tip - 1): score += 2
+            if is_outline(x - 5, y_tip - 2) or is_outline(x - 4, y_tip - 2): score += 2
+            if is_outline(x + 4, y_tip - 2) or is_outline(x + 5, y_tip - 2): score += 2
+            if is_outline(x - 6, y_tip - 3) or is_outline(x - 5, y_tip - 3): score += 2
+            if is_outline(x + 5, y_tip - 3) or is_outline(x + 6, y_tip - 3): score += 2
+            if is_outline(x - 7, y_tip - 4) or is_outline(x - 6, y_tip - 4): score += 2
+            if is_outline(x + 6, y_tip - 4) or is_outline(x + 7, y_tip - 4): score += 2
+            if is_outline(x - 5, y_tip - 17): score += 2
+
+            if score > best_score:
+                best_score = score
+                best_x = x
+
+        gdi32.DeleteObject(saveBitMap)
+        gdi32.DeleteDC(mfcDC)
+        user32.ReleaseDC(target, hwndDC)
+        return best_x, h - 41, False
+    except Exception:
+        pass
+    return 250, (h - 41) if h else 711, False
+
+def is_song_liked(force_refresh=False):
+    """带 1 秒 TTL 缓存的当前歌曲喜欢状态查询"""
+    now = time.time()
+    cur_song = get_current_song()
+    if not force_refresh and (now - _last_liked_cache["time"] < 1.0) and (_last_liked_cache["song"] == cur_song):
+        return _last_liked_cache["is_liked"]
+
+    target, _, w, h = get_orpheus_window()
+    _, _, liked = locate_heart_button(target, w, h)
+    _last_liked_cache["is_liked"] = liked
+    _last_liked_cache["time"] = now
+    _last_liked_cache["song"] = cur_song
+    return liked
 
 def is_progress_near_end(target, w, h):
     """
@@ -583,9 +707,31 @@ class MusicBox:
 
     @staticmethod
     def like_song():
-        """喜欢/收藏红心音乐（默认网易云全局热键 Ctrl + Alt + L）"""
-        print("[操作触发] 喜欢/收藏红心音乐 (Like Song: Ctrl+Alt+L)")
-        press_hotkey(VK_CONTROL, VK_L, extra_mod=VK_MENU)
+        """喜欢/收藏红心音乐（物理精准定位红心图标点击 + 全局热键双通道注入）"""
+        print("[操作触发] 喜欢/收藏红心音乐 (Like Song: Physical CEF Click + Hotkey Injection)")
+        cur_song = get_current_song()
+        target, render, w, h = get_orpheus_window()
+        if target and render:
+            cx, cy, init_liked = locate_heart_button(target, w, h)
+            print(f"[红心定位] 找到红心按钮坐标: ({cx}, {cy}), 当前喜欢状态: {init_liked}")
+            click_cef_button(cx, cy)
+            time.sleep(0.65)
+            _, _, new_liked = locate_heart_button(target, w, h)
+            # 若状态未翻转，补充一次脉冲
+            if new_liked == init_liked:
+                print("[红心重试] 补充脉冲点击...")
+                click_cef_button(cx, cy)
+                time.sleep(0.65)
+                _, _, new_liked = locate_heart_button(target, w, h)
+
+            _last_liked_cache["is_liked"] = new_liked
+            _last_liked_cache["time"] = time.time()
+            _last_liked_cache["song"] = cur_song
+            print(f"[红心结果] 最新喜欢状态: {new_liked}")
+            return new_liked
+        else:
+            press_hotkey(VK_CONTROL, VK_L, extra_mod=VK_MENU)
+            return False
 
     @staticmethod
     def volume_up():
@@ -825,7 +971,7 @@ class MusicHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
 
-        # 1. 实时状态查询接口（含当前歌曲、播放模式、播放状态）
+        # 1. 实时状态查询接口（含当前歌曲、播放模式、播放状态、喜欢状态）
         if path == "/api/status":
             actual_mode = get_current_play_mode()
             self.send_cors_json({
@@ -834,6 +980,7 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "current_song": get_current_song(),
                 "play_mode": actual_mode,
                 "is_playing": is_playing(),
+                "is_liked": is_song_liked(),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled),
                 "loop_interval": loop_manager.interval,
                 "local_ip": get_local_ip(),
@@ -860,6 +1007,7 @@ class MusicHandler(BaseHTTPRequestHandler):
                         "current_song": get_current_song(),
                         "play_mode": actual_mode,
                         "is_playing": is_playing(),
+                        "is_liked": is_song_liked(),
                         "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
                     })
                     return
@@ -876,6 +1024,8 @@ class MusicHandler(BaseHTTPRequestHandler):
                 res = getattr(MusicBox, cmd)()
                 if cmd == "toggle_loop":
                     msg = "enabled" if res else "disabled"
+                elif cmd == "like_song":
+                    msg = "已添加到我喜欢的音乐" if res else "已取消喜欢"
             else:
                 success = False
                 msg = f"Unknown command: {cmd}"
@@ -887,6 +1037,7 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "current_song": get_current_song(),
                 "play_mode": actual_mode,
                 "is_playing": is_playing(),
+                "is_liked": is_song_liked(force_refresh=(cmd == "like_song")),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
             })
             return
@@ -903,6 +1054,7 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "current_song": get_current_song(),
                 "play_mode": actual_mode,
                 "is_playing": is_playing(),
+                "is_liked": is_song_liked(),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
             })
             return

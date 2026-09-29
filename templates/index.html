@@ -302,9 +302,22 @@
     }
 
     .btn-like {
-      color: #ff5252;
-      border-color: rgba(255, 82, 82, 0.3);
-      background: rgba(255, 82, 82, 0.1);
+      color: #b0b4be;
+      border-color: rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.05);
+      transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .btn-like.liked {
+      color: #ff4757;
+      border-color: rgba(255, 71, 87, 0.5);
+      background: rgba(255, 71, 87, 0.18);
+      box-shadow: 0 4px 18px rgba(255, 71, 87, 0.28);
+    }
+
+    .btn-like.liked #like-icon {
+      transform: scale(1.15);
+      filter: drop-shadow(0 0 8px rgba(255, 71, 87, 0.7));
     }
 
     /* 音量控制 */
@@ -483,9 +496,9 @@
 
       <!-- 快捷动作：喜欢歌曲 & 从头重播 -->
       <div class="quick-actions">
-        <button class="btn-quick btn-like" onclick="doAction('like_song', '❤️ 已添加到我喜欢的音乐！')">
-          <span style="font-size: 18px;">❤️</span>
-          <span>喜欢这首歌</span>
+        <button id="btn-like-song" class="btn-quick btn-like" onclick="doLikeSong()">
+          <span id="like-icon" style="font-size: 18px;">🤍</span>
+          <span id="like-text">喜欢这首歌</span>
         </button>
         <button class="btn-quick" onclick="doAction('replay_song', '🔄 已从 0:00 重新播放当前曲目')">
           <span style="font-size: 17px;">🔄</span>
@@ -601,6 +614,7 @@
           if (toastText) showToast(toastText);
           if (data.current_song) updateSongTitle(data.current_song);
           if (typeof data.is_playing === 'boolean') updatePlayingUI(data.is_playing);
+          if (typeof data.is_liked === 'boolean') updateLikedUI(data.is_liked);
           if (Date.now() > _modeSwitchLockUntil && data.play_mode) {
             updateModeUI(data.play_mode);
           }
@@ -694,6 +708,59 @@
       }
     }
 
+    // 更新红心喜欢按钮 UI 状态
+    function updateLikedUI(isLiked) {
+      const btn = document.getElementById('btn-like-song');
+      const icon = document.getElementById('like-icon');
+      const text = document.getElementById('like-text');
+      if (!btn || !icon || !text) return;
+      if (isLiked) {
+        btn.classList.add('liked');
+        icon.innerText = '❤️';
+        text.innerText = '已喜欢';
+      } else {
+        btn.classList.remove('liked');
+        icon.innerText = '🤍';
+        text.innerText = '喜欢这首歌';
+      }
+    }
+
+    // 喜欢/取消喜欢当前曲目（含乐观 UI 更新与错误自动恢复）
+    let _isLikingSong = false;
+    function doLikeSong() {
+      if (_isLikingSong) return;
+      _isLikingSong = true;
+      vibrate(45);
+
+      const btn = document.getElementById('btn-like-song');
+      const currentlyLiked = btn ? btn.classList.contains('liked') : false;
+      // 乐观更新 UI
+      updateLikedUI(!currentlyLiked);
+
+      fetch('/api/action?cmd=like_song')
+        .then(res => res.json())
+        .then(data => {
+          if (typeof data.is_liked === 'boolean') {
+            updateLikedUI(data.is_liked);
+            if (data.is_liked) {
+              showToast('❤️ 已添加到我喜欢的音乐！');
+            } else {
+              showToast('💔 已从喜欢音乐中移除');
+            }
+          } else {
+            showToast(data.message || '操作完成');
+          }
+          if (data.current_song) updateSongTitle(data.current_song);
+        })
+        .catch(() => {
+          updateLikedUI(currentlyLiked);
+          showToast('喜欢操作失败，请重试');
+        })
+        .finally(() => {
+          _isLikingSong = false;
+        });
+    }
+
     // 轮询同步歌曲名称与状态
     let failedCount = 0;
     function syncStatus() {
@@ -706,6 +773,7 @@
           failedCount = 0;
           updateSongTitle(data.current_song);
           if (typeof data.is_playing === 'boolean') updatePlayingUI(data.is_playing);
+          if (typeof data.is_liked === 'boolean') updateLikedUI(data.is_liked);
           // 仅在用户未进行手动模式换档期间同步物理模式
           if (Date.now() > _modeSwitchLockUntil && data.play_mode) {
             updateModeUI(data.play_mode);

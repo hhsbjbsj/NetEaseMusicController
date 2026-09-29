@@ -201,6 +201,71 @@ def detect_play_mode(target=None, w=None, h=None):
         return "list_loop"
 
 _last_mode_cache = {"mode": "list_loop", "time": 0}
+_last_play_cache = {"is_playing": True, "time": 0}
+_mode_switch_lock = threading.Lock()
+MODE_ORDER = ['sequential', 'list_loop', 'single_loop', 'shuffle']
+
+def is_playing(force_refresh=False):
+    """
+    通过高速获取播放控制核心区域像素，100% 准确获取网易云物理播放状态：
+    - True: 正在播放中（中心为暂停双竖线，两竖线中间隙呈底层红色背景）
+    - False: 已暂停（中心为播放三角形，正中像素呈实心纯白）
+    """
+    now = time.time()
+    if not force_refresh and (now - _last_play_cache["time"] < 0.6):
+        return _last_play_cache["is_playing"]
+
+    try:
+        target, _, w, h = get_orpheus_window()
+        if not target or w < 300 or h < 200:
+            return _last_play_cache["is_playing"]
+
+        cx = w // 2
+        cy = h - 41
+
+        hwndDC = user32.GetWindowDC(target)
+        mfcDC = gdi32.CreateCompatibleDC(hwndDC)
+        saveBitMap = gdi32.CreateCompatibleBitmap(hwndDC, w, h)
+        gdi32.SelectObject(mfcDC, saveBitMap)
+        user32.PrintWindow(target, mfcDC, 2)
+
+        color = gdi32.GetPixel(mfcDC, cx, cy)
+        r = color & 0xFF
+        g = (color >> 8) & 0xFF
+        b = (color >> 16) & 0xFF
+
+        gdi32.DeleteObject(saveBitMap)
+        gdi32.DeleteDC(mfcDC)
+        user32.ReleaseDC(target, hwndDC)
+
+        # 暂停时中心显示播放三角，正中为纯白 (r, g, b 均 > 200)
+        # 播放时中心显示暂停双竖线，正中为底色红色 (g, b 较低)
+        playing = not (r > 200 and g > 200 and b > 200)
+        _last_play_cache["is_playing"] = playing
+        _last_play_cache["time"] = now
+        return playing
+    except Exception:
+        return _last_play_cache["is_playing"]
+
+def click_cef_button(cx, cy):
+    """向网易云渲染子窗口精确注入一次物理鼠标点击事件"""
+    try:
+        target_hwnd, render_hwnd, w, h = get_orpheus_window()
+        if render_hwnd:
+            lparam = (cy << 16) | (cx & 0xFFFF)
+            WM_MOUSEMOVE = 0x0200
+            WM_LBUTTONDOWN = 0x0201
+            WM_LBUTTONUP = 0x0202
+            MK_LBUTTON = 0x0001
+            user32.PostMessageW(render_hwnd, WM_MOUSEMOVE, 0, lparam)
+            time.sleep(0.03)
+            user32.PostMessageW(render_hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lparam)
+            time.sleep(0.05)
+            user32.PostMessageW(render_hwnd, WM_LBUTTONUP, 0, lparam)
+            return True
+    except Exception:
+        pass
+    return False
 
 def get_current_play_mode(force_refresh=False):
     """带 1 秒 TTL 缓存的高性能物理模式查询"""
@@ -214,56 +279,76 @@ def get_current_play_mode(force_refresh=False):
 
 def switch_to_mode(target_mode):
     """
-    闭环视觉自校验模式换档器：
-    向网易云物理模式按钮精确注入点击指令，并在毫秒级内校验图标变动，确保 100% 换档到位。
+    闭环极速自校验模式换档器：
+    利用四档确定性状态环（顺序 -> 列表 -> 单曲 -> 随机）进行毫秒级精准脉冲换档，
+    并在换档后进行光学栅格复验，彻底杜绝模式反复跳变与死循环。
     """
-    target_hwnd, render_hwnd, w, h = get_orpheus_window()
-    if not target_hwnd or not render_hwnd:
-        print("[模式切换] 未找到网易云窗口，无法换档")
-        return None
+    with _mode_switch_lock:
+        target_hwnd, render_hwnd, w, h = get_orpheus_window()
+        if not target_hwnd or not render_hwnd:
+            print("[模式切换] 未找到网易云窗口，无法换档")
+            return None
 
-    names = {
-        'sequential': '顺序播放',
-        'list_loop': '列表循环',
-        'single_loop': '单曲循环',
-        'shuffle': '随机播放'
-    }
+        names = {
+            'sequential': '顺序播放',
+            'list_loop': '列表循环',
+            'single_loop': '单曲循环',
+            'shuffle': '随机播放'
+        }
 
-    current = detect_play_mode(target_hwnd, w, h)
-    print(f"[模式切换] 当前物理模式: 【{names.get(current, current)}】 -> 目标模式: 【{names.get(target_mode, target_mode)}】")
-    if current == target_mode:
-        print(f"[模式切换] 已经处于【{names.get(target_mode, target_mode)}】，无需额外换档")
-        _last_mode_cache["mode"] = target_mode
-        _last_mode_cache["time"] = time.time()
-        return current
-
-    cx = w // 2 - 95
-    cy = h - 41
-    lparam = (cy << 16) | (cx & 0xFFFF)
-
-    WM_MOUSEMOVE = 0x0200
-    WM_LBUTTONDOWN = 0x0201
-    WM_LBUTTONUP = 0x0202
-    MK_LBUTTON = 0x0001
-
-    for step in range(4):
-        user32.PostMessageW(render_hwnd, WM_MOUSEMOVE, 0, lparam)
-        time.sleep(0.04)
-        user32.PostMessageW(render_hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lparam)
-        time.sleep(0.06)
-        user32.PostMessageW(render_hwnd, WM_LBUTTONUP, 0, lparam)
-        time.sleep(0.25)  # 等待 CEF 渲染界面重绘
+        if target_mode not in MODE_ORDER:
+            target_mode = 'list_loop'
 
         current = detect_play_mode(target_hwnd, w, h)
+        print(f"[模式切换] 当前物理模式: 【{names.get(current, current)}】 -> 目标模式: 【{names.get(target_mode, target_mode)}】")
         if current == target_mode:
-            print(f"[模式切换] 换档成功！经过第 {step + 1} 次点击已进入【{names.get(target_mode, target_mode)}】！")
+            print(f"[模式切换] 已经处于【{names.get(target_mode, target_mode)}】，无需额外换档")
             _last_mode_cache["mode"] = target_mode
             _last_mode_cache["time"] = time.time()
             return current
 
-    _last_mode_cache["mode"] = current
-    _last_mode_cache["time"] = time.time()
-    return current
+        cx = w // 2 - 95
+        cy = h - 41
+        lparam = (cy << 16) | (cx & 0xFFFF)
+
+        def click_once():
+            user32.PostMessageW(render_hwnd, 0x0200, 0, lparam)
+            time.sleep(0.03)
+            user32.PostMessageW(render_hwnd, 0x0201, 1, lparam)
+            time.sleep(0.04)
+            user32.PostMessageW(render_hwnd, 0x0202, 0, lparam)
+
+        idx_cur = MODE_ORDER.index(current)
+        idx_tgt = MODE_ORDER.index(target_mode)
+        needed_clicks = (idx_tgt - idx_cur) % 4
+
+        for i in range(needed_clicks):
+            click_once()
+            if i < needed_clicks - 1:
+                time.sleep(0.08)
+
+        time.sleep(0.25)  # 等待 CEF 渲染重绘
+        current = detect_play_mode(target_hwnd, w, h)
+        if current == target_mode:
+            print(f"[模式切换] 极速脉冲换档成功！直接切入【{names.get(target_mode, target_mode)}】！")
+            _last_mode_cache["mode"] = target_mode
+            _last_mode_cache["time"] = time.time()
+            return current
+
+        # 闭环补正：若极偶然步数有偏差，逐次补点确认（最多2次）
+        for step in range(2):
+            click_once()
+            time.sleep(0.25)
+            current = detect_play_mode(target_hwnd, w, h)
+            if current == target_mode:
+                print(f"[模式切换] 闭环补正成功！已进入【{names.get(target_mode, target_mode)}】！")
+                _last_mode_cache["mode"] = target_mode
+                _last_mode_cache["time"] = time.time()
+                return current
+
+        _last_mode_cache["mode"] = current
+        _last_mode_cache["time"] = time.time()
+        return current
 
 class SingleSongLoopManager:
     """管理单曲自动循环重播助手状态与定时器"""
@@ -324,35 +409,45 @@ class MusicBox:
     @staticmethod
     def next_song():
         print("[操作触发] 下一首 (Next Track)")
-        press_hotkey(VK_CONTROL, VK_F3)
-        time.sleep(0.03)
-        press_media_key(VK_MEDIA_NEXT_TRACK)
+        target, render, w, h = get_orpheus_window()
+        if render and w > 0:
+            click_cef_button(w // 2 + 50, h - 41)
+        else:
+            press_media_key(VK_MEDIA_NEXT_TRACK)
 
     @staticmethod
     def prev_song():
         print("[操作触发] 上一首 (Previous Track)")
-        press_hotkey(VK_CONTROL, VK_F1)
-        time.sleep(0.03)
-        press_media_key(VK_MEDIA_PREV_TRACK)
+        target, render, w, h = get_orpheus_window()
+        if render and w > 0:
+            click_cef_button(w // 2 - 50, h - 41)
+        else:
+            press_media_key(VK_MEDIA_PREV_TRACK)
 
     @staticmethod
     def pause_play():
         print("[操作触发] 播放/暂停 (Play/Pause)")
-        press_hotkey(VK_CONTROL, VK_F2)
-        time.sleep(0.03)
-        press_media_key(VK_MEDIA_PLAY_PAUSE)
+        target, render, w, h = get_orpheus_window()
+        if render and w > 0:
+            click_cef_button(w // 2, h - 41)
+        else:
+            press_media_key(VK_MEDIA_PLAY_PAUSE)
+        time.sleep(0.15)
+        return is_playing(force_refresh=True)
 
     @staticmethod
     def replay_song():
-        """重播本首：连续发送两次上一首命令，网易云将立即从 0:00 重新播放当前曲目"""
+        """重播本首：两次点击上一首，网易云将立即从 0:00 重新播放当前曲目"""
         print("[操作触发] 重新播放本首 (Replay from 0:00)")
-        press_hotkey(VK_CONTROL, VK_F1)
-        time.sleep(0.05)
-        press_media_key(VK_MEDIA_PREV_TRACK)
-        time.sleep(0.12)
-        press_hotkey(VK_CONTROL, VK_F1)
-        time.sleep(0.05)
-        press_media_key(VK_MEDIA_PREV_TRACK)
+        target, render, w, h = get_orpheus_window()
+        if render and w > 0:
+            click_cef_button(w // 2 - 50, h - 41)
+            time.sleep(0.12)
+            click_cef_button(w // 2 - 50, h - 41)
+        else:
+            press_media_key(VK_MEDIA_PREV_TRACK)
+            time.sleep(0.12)
+            press_media_key(VK_MEDIA_PREV_TRACK)
 
     @staticmethod
     def toggle_loop():
@@ -381,13 +476,11 @@ class MusicBox:
     @staticmethod
     def volume_up():
         print("[操作触发] 音量+ (Volume Up)")
-        press_hotkey(VK_CONTROL, VK_F6)
         press_media_key(VK_VOLUME_UP)
 
     @staticmethod
     def volume_down():
         print("[操作触发] 音量- (Volume Down)")
-        press_hotkey(VK_CONTROL, VK_F4)
         press_media_key(VK_VOLUME_DOWN)
 
     @staticmethod
@@ -579,6 +672,8 @@ def get_local_ip():
 
 
 
+_action_cooldown = {}
+
 class MusicHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         sys.stdout.write(f"[{time.strftime('%H:%M:%S')}] {self.address_string()} - {format % args}\n")
@@ -611,7 +706,7 @@ class MusicHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
 
-        # 1. 实时状态查询接口（含当前歌曲、播放模式）
+        # 1. 实时状态查询接口（含当前歌曲、播放模式、播放状态）
         if path == "/api/status":
             actual_mode = get_current_play_mode()
             self.send_cors_json({
@@ -619,6 +714,7 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "version": "2.5.0",
                 "current_song": get_current_song(),
                 "play_mode": actual_mode,
+                "is_playing": is_playing(),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled),
                 "loop_interval": loop_manager.interval,
                 "local_ip": get_local_ip(),
@@ -632,6 +728,23 @@ class MusicHandler(BaseHTTPRequestHandler):
             val = query.get("val", [None])[0]
             success = True
             msg = "OK"
+
+            # 服务端防抖：对 pause_play, next_song, prev_song 等高频开关动作实施 300ms 冷却拦截，规避瞬态抖动
+            now = time.time()
+            if cmd in ("pause_play", "next_song", "prev_song"):
+                last_t = _action_cooldown.get(cmd, 0)
+                if now - last_t < 0.30:
+                    actual_mode = get_current_play_mode()
+                    self.send_cors_json({
+                        "success": True,
+                        "message": "debounced",
+                        "current_song": get_current_song(),
+                        "play_mode": actual_mode,
+                        "is_playing": is_playing(),
+                        "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
+                    })
+                    return
+                _action_cooldown[cmd] = now
 
             if cmd == "set_mode":
                 MusicBox.set_mode(val or "list_loop")
@@ -654,6 +767,7 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "message": msg,
                 "current_song": get_current_song(),
                 "play_mode": actual_mode,
+                "is_playing": is_playing(),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
             })
             return
@@ -669,6 +783,7 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "version": "2.5.0",
                 "current_song": get_current_song(),
                 "play_mode": actual_mode,
+                "is_playing": is_playing(),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
             })
             return

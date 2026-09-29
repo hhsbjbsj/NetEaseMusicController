@@ -217,6 +217,17 @@
       box-shadow: 0 4px 12px var(--accent-glow);
     }
 
+    .btn-play.paused {
+      background: linear-gradient(135deg, #484b52, #2f3036);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+      color: #d1d1d6;
+    }
+
+    .btn-mode.switching {
+      opacity: 0.55;
+      pointer-events: none;
+    }
+
     /* 播放模式选择器（单曲循环、列表循环、随机播放、顺序播放） */
     .section-title {
       font-size: 13px;
@@ -466,7 +477,7 @@
       <!-- 上/停/下 控制 -->
       <div class="main-controls">
         <button class="btn-circle" onclick="doAction('prev_song', '上一首')">⏮</button>
-        <button class="btn-circle btn-play" onclick="doAction('pause_play', '播放 / 暂停')">⏯</button>
+        <button id="btn-play-pause" class="btn-circle btn-play" onclick="doAction('pause_play', '播放 / 暂停')">⏸</button>
         <button class="btn-circle" onclick="doAction('next_song', '下一首')">⏭</button>
       </div>
 
@@ -564,29 +575,83 @@
       }, 2000);
     }
 
-    // 执行动作
+    let _lastActionTime = 0;
+    let _modeSwitchLockUntil = 0;
+    let _isSwitchingMode = false;
+
+    // 执行动作（含 300ms 防抖与播放状态实时响应）
     function doAction(actionName, toastText) {
+      const now = Date.now();
+      if (now - _lastActionTime < 300) return;
+      _lastActionTime = now;
       vibrate(40);
+
+      // 若为播放/暂停操作，先在本地做乐观状态翻转，提升即时交互体验
+      if (actionName === 'pause_play') {
+        const playBtn = document.getElementById('btn-play-pause');
+        if (playBtn) {
+          const isCurrentlyPaused = playBtn.classList.contains('paused');
+          updatePlayingUI(isCurrentlyPaused);
+        }
+      }
+
       fetch('/api/action?cmd=' + actionName)
         .then(res => res.json())
         .then(data => {
           if (toastText) showToast(toastText);
           if (data.current_song) updateSongTitle(data.current_song);
-          if (data.play_mode) updateModeUI(data.play_mode);
+          if (typeof data.is_playing === 'boolean') updatePlayingUI(data.is_playing);
+          if (Date.now() > _modeSwitchLockUntil && data.play_mode) {
+            updateModeUI(data.play_mode);
+          }
         })
         .catch(() => showToast('指令发送失败，请检查网络'));
     }
 
-    // 切换指定播放模式
+    // 切换指定播放模式（含乐观高亮与防回跳锁定保护）
     function setPlayMode(modeName, toastText) {
+      if (_isSwitchingMode) return;
+      _isSwitchingMode = true;
+      _modeSwitchLockUntil = Date.now() + 2500; // 锁定 2.5 秒，严防后台轮询覆盖
+
+      // 立即在前端高亮目标模式，彻底消除“切过去又弹回来”的闪烁感
+      updateModeUI(modeName);
+      if (toastText) showToast(toastText);
       vibrate(45);
+
+      const modeBtns = document.querySelectorAll('.btn-mode');
+      modeBtns.forEach(b => b.classList.add('switching'));
+
       fetch('/api/action?cmd=set_mode&val=' + modeName)
         .then(res => res.json())
         .then(data => {
-          updateModeUI(modeName);
-          showToast(toastText);
+          if (data.play_mode) {
+            updateModeUI(data.play_mode);
+          }
         })
-        .catch(() => showToast('切换模式失败'));
+        .catch(() => showToast('切换模式失败，请重试'))
+        .finally(() => {
+          _isSwitchingMode = false;
+          modeBtns.forEach(b => b.classList.remove('switching'));
+        });
+    }
+
+    // 更新播放状态 UI (播放 / 暂停按钮与跳动音阶)
+    function updatePlayingUI(isPlaying) {
+      const playBtn = document.getElementById('btn-play-pause');
+      const eqBars = document.querySelectorAll('.eq-bar');
+      if (playBtn) {
+        if (isPlaying) {
+          playBtn.innerText = '⏸';
+          playBtn.classList.remove('paused');
+        } else {
+          playBtn.innerText = '▶';
+          playBtn.classList.add('paused');
+        }
+      }
+      eqBars.forEach(bar => {
+        bar.style.animationPlayState = isPlaying ? 'running' : 'paused';
+      });
     }
 
     // 更新播放模式 UI 高亮
@@ -639,7 +704,11 @@
         .then(data => {
           failedCount = 0;
           updateSongTitle(data.current_song);
-          if (data.play_mode) updateModeUI(data.play_mode);
+          if (typeof data.is_playing === 'boolean') updatePlayingUI(data.is_playing);
+          // 仅在用户未进行手动模式换档期间同步物理模式
+          if (Date.now() > _modeSwitchLockUntil && data.play_mode) {
+            updateModeUI(data.play_mode);
+          }
           const connEl = document.getElementById('conn-text');
           const dotEl = document.querySelector('.status-dot');
           const badgeEl = document.querySelector('.badge-status');

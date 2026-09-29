@@ -93,28 +93,6 @@ from comtypes import GUID, IUnknown, COMMETHOD, HRESULT, CoCreateInstance, CLSCT
 
 CLSID_MMDeviceEnumerator = GUID('{BCDE0395-E52F-467C-8E3D-C4579291692E}')
 
-class IMMDevice(IUnknown):
-    _iid_ = GUID('{D666063F-1587-4E43-81F1-B948E807363F}')
-    _methods_ = [
-        COMMETHOD([], HRESULT, 'Activate',
-                  (['in'], ctypes.POINTER(GUID), 'iid'),
-                  (['in'], wintypes.DWORD, 'dwClsCtx'),
-                  (['in'], ctypes.c_void_p, 'pActivationParams'),
-                  (['out'], ctypes.POINTER(ctypes.POINTER(IUnknown)), 'ppInterface')),
-        COMMETHOD([], HRESULT, 'OpenPropertyStore'),
-        COMMETHOD([], HRESULT, 'GetId', (['out'], ctypes.POINTER(wintypes.LPWSTR), 'ppstrId'))
-    ]
-
-class IMMDeviceCollection(IUnknown):
-    _iid_ = GUID('{0BD7A1BE-7A1A-44DB-8397-CC5392387B5E}')
-    _methods_ = [
-        COMMETHOD([], HRESULT, 'GetCount',
-                  (['out'], ctypes.POINTER(wintypes.UINT), 'pcDevices')),
-        COMMETHOD([], HRESULT, 'Item',
-                  (['in'], wintypes.UINT, 'nDevice'),
-                  (['out'], ctypes.POINTER(ctypes.POINTER(IMMDevice)), 'ppDevice'))
-    ]
-
 class IAudioEndpointVolume(IUnknown):
     _iid_ = GUID('{5CDF2C82-841E-4546-9722-0CF74078229A}')
     _methods_ = [
@@ -138,6 +116,28 @@ class IAudioEndpointVolume(IUnknown):
         COMMETHOD([], HRESULT, 'GetVolumeRange')
     ]
 
+class IMMDevice(IUnknown):
+    _iid_ = GUID('{D666063F-1587-4E43-81F1-B948E807363F}')
+    _methods_ = [
+        COMMETHOD([], HRESULT, 'Activate',
+                  (['in'], ctypes.POINTER(GUID), 'iid'),
+                  (['in'], wintypes.DWORD, 'dwClsCtx'),
+                  (['in'], ctypes.c_void_p, 'pActivationParams'),
+                  (['out'], ctypes.POINTER(ctypes.POINTER(IAudioEndpointVolume)), 'ppInterface')),
+        COMMETHOD([], HRESULT, 'OpenPropertyStore'),
+        COMMETHOD([], HRESULT, 'GetId', (['out'], ctypes.POINTER(wintypes.LPWSTR), 'ppstrId'))
+    ]
+
+class IMMDeviceCollection(IUnknown):
+    _iid_ = GUID('{0BD7A1BE-7A1A-44DB-8397-CC5392387B5E}')
+    _methods_ = [
+        COMMETHOD([], HRESULT, 'GetCount',
+                  (['out'], ctypes.POINTER(wintypes.UINT), 'pcDevices')),
+        COMMETHOD([], HRESULT, 'Item',
+                  (['in'], wintypes.UINT, 'nDevice'),
+                  (['out'], ctypes.POINTER(ctypes.POINTER(IMMDevice)), 'ppDevice'))
+    ]
+
 class IMMDeviceEnumerator(IUnknown):
     _iid_ = GUID('{A95664D2-9614-4F35-A746-DE8DB63617E6}')
     _methods_ = [
@@ -151,21 +151,23 @@ class IMMDeviceEnumerator(IUnknown):
                   (['out'], ctypes.POINTER(ctypes.POINTER(IMMDevice)), 'ppEndpoint'))
     ]
 
+_audio_lock = threading.Lock()
+
 def get_real_master_volume():
     """获取当前系统默认输出端点的真实硬件主音量百分比 (0-100)"""
-    try:
-        comtypes.CoInitialize()
+    with _audio_lock:
         try:
+            try:
+                comtypes.CoInitialize()
+            except Exception:
+                pass
             enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_INPROC_SERVER)
             dev = enumerator.GetDefaultAudioEndpoint(0, 1) # eRender=0, eMultimedia=1
-            vol_ptr = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
-            ep = ctypes.cast(vol_ptr, ctypes.POINTER(IAudioEndpointVolume))
+            ep = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
             level = ep.GetMasterVolumeLevelScalar()
             return max(0, min(100, round(level * 100)))
-        finally:
-            comtypes.CoUninitialize()
-    except Exception as e:
-        return _volume_state.get("volume", 80)
+        except Exception:
+            return _volume_state.get("volume", 70)
 
 def set_real_master_volume(pct):
     """
@@ -174,9 +176,12 @@ def set_real_master_volume(pct):
     """
     pct = max(0, min(100, int(pct)))
     scalar = float(pct) / 100.0
-    try:
-        comtypes.CoInitialize()
+    with _audio_lock:
         try:
+            try:
+                comtypes.CoInitialize()
+            except Exception:
+                pass
             enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_INPROC_SERVER)
             # 1. 遍历并设定所有活跃渲染设备 (DEVICE_STATE_ACTIVE = 1)
             try:
@@ -185,8 +190,7 @@ def set_real_master_volume(pct):
                 for i in range(count):
                     try:
                         d = col.Item(i)
-                        v_ptr = d.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
-                        ep = ctypes.cast(v_ptr, ctypes.POINTER(IAudioEndpointVolume))
+                        ep = d.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
                         ep.SetMasterVolumeLevelScalar(scalar, None)
                         if pct > 0:
                             ep.SetMute(False, None)
@@ -197,17 +201,14 @@ def set_real_master_volume(pct):
             # 2. 确保默认多媒体端点精准写入
             try:
                 def_dev = enumerator.GetDefaultAudioEndpoint(0, 1)
-                v_ptr = def_dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
-                ep = ctypes.cast(v_ptr, ctypes.POINTER(IAudioEndpointVolume))
+                ep = def_dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
                 ep.SetMasterVolumeLevelScalar(scalar, None)
                 if pct > 0:
                     ep.SetMute(False, None)
             except Exception:
                 pass
-        finally:
-            comtypes.CoUninitialize()
-    except Exception as e:
-        print(f"[WASAPI] 写入主音量异常: {e}")
+        except Exception as e:
+            print(f"[WASAPI] 写入主音量异常: {e}")
 
     # 兜底联动写入 waveOut
     try:
@@ -223,9 +224,12 @@ def set_real_master_volume(pct):
 def set_real_master_mute(mute_bool):
     """向所有活动音频设备下发系统底层真实静音/解静音指令"""
     mute_bool = bool(mute_bool)
-    try:
-        comtypes.CoInitialize()
+    with _audio_lock:
         try:
+            try:
+                comtypes.CoInitialize()
+            except Exception:
+                pass
             enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_INPROC_SERVER)
             try:
                 col = enumerator.EnumAudioEndpoints(0, 1)
@@ -233,8 +237,7 @@ def set_real_master_mute(mute_bool):
                 for i in range(count):
                     try:
                         d = col.Item(i)
-                        v_ptr = d.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
-                        ep = ctypes.cast(v_ptr, ctypes.POINTER(IAudioEndpointVolume))
+                        ep = d.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
                         ep.SetMute(mute_bool, None)
                     except Exception:
                         pass
@@ -242,33 +245,30 @@ def set_real_master_mute(mute_bool):
                 pass
             try:
                 def_dev = enumerator.GetDefaultAudioEndpoint(0, 1)
-                v_ptr = def_dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
-                ep = ctypes.cast(v_ptr, ctypes.POINTER(IAudioEndpointVolume))
+                ep = def_dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
                 ep.SetMute(mute_bool, None)
             except Exception:
                 pass
-        finally:
-            comtypes.CoUninitialize()
-    except Exception as e:
-        print(f"[WASAPI] 设置静音异常: {e}")
+        except Exception as e:
+            print(f"[WASAPI] 设置静音异常: {e}")
 
     _volume_state["is_muted"] = mute_bool
     return mute_bool
 
 def get_real_master_mute():
     """获取 Windows 默认音频端点当前的静音状态"""
-    try:
-        comtypes.CoInitialize()
+    with _audio_lock:
         try:
+            try:
+                comtypes.CoInitialize()
+            except Exception:
+                pass
             enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_INPROC_SERVER)
             def_dev = enumerator.GetDefaultAudioEndpoint(0, 1)
-            v_ptr = def_dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
-            ep = ctypes.cast(v_ptr, ctypes.POINTER(IAudioEndpointVolume))
+            ep = def_dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_INPROC_SERVER, None)
             return bool(ep.GetMute())
-        finally:
-            comtypes.CoUninitialize()
-    except Exception:
-        return _volume_state.get("is_muted", False)
+        except Exception:
+            return _volume_state.get("is_muted", False)
 
 def get_sys_wave_volume():
     """获取系统 WaveOut 底层音量百分比 (0-100)"""
@@ -1506,6 +1506,11 @@ class MusicHandler(BaseHTTPRequestHandler):
 def main():
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+    try:
+        comtypes.CoInitialize()
     except Exception:
         pass
 

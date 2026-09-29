@@ -163,7 +163,7 @@ def detect_play_mode(target=None, w=None, h=None):
 
         user32.PrintWindow(target, mfcDC, 2)
 
-        # 采样 17x17 栅格 (0=白/背景, 1=图标暗色)
+        # 采样 17x17 栅格 (0=白/背景, 1=图标暗色，阈值设为 220 以稳定捕捉抗锯齿浅灰像素)
         grid = []
         for dy in range(-8, 9):
             row = []
@@ -172,7 +172,7 @@ def detect_play_mode(target=None, w=None, h=None):
                 r = color & 0xFF
                 g = (color >> 8) & 0xFF
                 b = (color >> 16) & 0xFF
-                is_dark = 1 if (r < 180 and g < 180 and b < 180) else 0
+                is_dark = 1 if (r < 220 and g < 220 and b < 220) else 0
                 row.append(is_dark)
             grid.append(row)
 
@@ -180,24 +180,46 @@ def detect_play_mode(target=None, w=None, h=None):
         gdi32.DeleteDC(mfcDC)
         user32.ReleaseDC(target, hwndDC)
 
-        # 校验特征完整度：若暗色像素少于 20，属于无效捕获或尚未重绘，返回上一次可靠缓存
+        # 校验特征完整度：若暗色像素少于 45，说明 CEF 正处于点击动画过渡态中，稍等 150ms 重新截取稳定帧
         total_dark = sum(sum(row) for row in grid)
-        if total_dark < 20:
-            return _last_mode_cache.get("mode", "list_loop")
+        if total_dark < 45:
+            time.sleep(0.15)
+            hwndDC = user32.GetWindowDC(target)
+            mfcDC = gdi32.CreateCompatibleDC(hwndDC)
+            saveBitMap = gdi32.CreateCompatibleBitmap(hwndDC, w, h)
+            gdi32.SelectObject(mfcDC, saveBitMap)
+            user32.PrintWindow(target, mfcDC, 2)
+            grid = []
+            for dy in range(-8, 9):
+                row = []
+                for dx in range(-8, 9):
+                    color = gdi32.GetPixel(mfcDC, cx + dx, cy + dy)
+                    r = color & 0xFF
+                    g = (color >> 8) & 0xFF
+                    b = (color >> 16) & 0xFF
+                    is_dark = 1 if (r < 220 and g < 220 and b < 220) else 0
+                    row.append(is_dark)
+                grid.append(row)
+            gdi32.DeleteObject(saveBitMap)
+            gdi32.DeleteDC(mfcDC)
+            user32.ReleaseDC(target, hwndDC)
+            total_dark = sum(sum(row) for row in grid)
+            if total_dark < 30:
+                return _last_mode_cache.get("mode", "list_loop")
 
-        # 1. 顺序播放 (sequential): 中间 6..11 行完全没有任何暗色像素，且图标特征完整
+        # 1. 顺序播放 (sequential): 中间 6..11 行完全没有任何暗色像素 (双平箭头)
         mid_rows_sum = sum(sum(grid[y]) for y in range(6, 12))
-        if mid_rows_sum == 0 and total_dark >= 25:
+        if mid_rows_sum == 0 and total_dark >= 40:
             return "sequential"
 
-        # 2. 单曲循环 (single_loop): 中心列 x=7 处有数字 1 的竖线 (连续暗色)
-        digit1_count = sum(grid[y][7] for y in range(7, 12))
-        if digit1_count >= 4:
+        # 2. 单曲循环 (single_loop): 中心竖线在 col 7..8 (数字 1 竖线特征累积 >= 8)
+        col7_8 = sum(grid[y][x] for y in range(6, 13) for x in (7, 8))
+        if col7_8 >= 8:
             return "single_loop"
 
-        # 3. 随机播放 (shuffle): 中间交叉区域 (y=6..11, x=4..7) 有多处交叉像素
-        cross_count = sum(grid[y][x] for y in range(6, 12) for x in range(4, 8))
-        if cross_count >= 5:
+        # 3. 随机播放 (shuffle): 左侧交叉区域 (rows 6..11, cols 3..6 交叉线特征累积 >= 7)
+        cross_box = sum(grid[y][x] for y in range(6, 12) for x in range(3, 7))
+        if cross_box >= 7:
             return "shuffle"
 
         # 4. 列表循环 (list_loop): 环形箭头，中间中心区域为空
@@ -272,6 +294,37 @@ def click_cef_button(cx, cy):
         pass
     return False
 
+def is_progress_near_end(target, w, h):
+    """
+    通过采样网易云播放进度条末梢 (98.2% 处) 像素，毫秒级侦测当前曲目是否已临近播毕 (最后 1-2 秒)：
+    - True: 进度条已红化至 >= 98.2%，曲目即将自然结束
+    - False: 正在常规播放区间
+    """
+    try:
+        if not target or w < 300 or h < 200:
+            return False
+        test_x = int(w * 0.982)
+        y = h - 82
+
+        hwndDC = user32.GetWindowDC(target)
+        mfcDC = gdi32.CreateCompatibleDC(hwndDC)
+        saveBitMap = gdi32.CreateCompatibleBitmap(hwndDC, w, h)
+        gdi32.SelectObject(mfcDC, saveBitMap)
+        user32.PrintWindow(target, mfcDC, 2)
+
+        c = gdi32.GetPixel(mfcDC, test_x, y)
+        r = c & 0xFF
+        g = (c >> 8) & 0xFF
+        b = (c >> 16) & 0xFF
+
+        gdi32.DeleteObject(saveBitMap)
+        gdi32.DeleteDC(mfcDC)
+        user32.ReleaseDC(target, hwndDC)
+
+        return (r > 200 and g < 150 and b < 160)
+    except Exception:
+        return False
+
 def get_current_play_mode(force_refresh=False):
     """带 1 秒 TTL 缓存的高性能物理模式查询"""
     now = time.time()
@@ -285,9 +338,9 @@ def get_current_play_mode(force_refresh=False):
 def switch_to_mode(target_mode):
     """
     闭环确定性模式换档器：
-    基于状态环周期 (0: sequential -> 1: list_loop -> 2: single_loop -> 3: shuffle)，
-    以 350ms 充裕重绘时间注入确定性脉冲步进，并在末尾进行视觉闭环复验与补正。
-    确保 100% 精确到达目标模式，绝无超调、漏跳或循环回退。
+    基于状态环周期 (sequential -> list_loop -> single_loop -> shuffle)，
+    以 550ms 充裕重绘时间（彻底跨越 Windows 500ms 双击阈值）注入脉冲步进，
+    并在末尾进行视觉闭环复验。
     """
     with _mode_switch_lock:
         target_hwnd, render_hwnd, w, h = get_orpheus_window()
@@ -320,11 +373,12 @@ def switch_to_mode(target_mode):
         idx_tgt = MODE_ORDER.index(target_mode)
         needed_clicks = (idx_tgt - idx_cur) % 4
 
-        print(f"[模式切换] 注入确定性脉冲步进: 需点击 {needed_clicks} 次 (间隔 350ms)")
+        print(f"[模式切换] 注入确定性脉冲步进: 需点击 {needed_clicks} 次 (间隔 550ms)")
         for i in range(needed_clicks):
             click_cef_button(cx, cy)
-            time.sleep(0.35)  # 严格保证 CEF 渲染重绘完成，彻底杜绝丢帧与双击合并
+            time.sleep(0.55)  # 严格大于 Windows 500ms 双击阈值，确保 CEF 完整单次点击重绘
 
+        time.sleep(0.3)
         current = detect_play_mode(target_hwnd, w, h)
         if current == target_mode:
             print(f"[模式切换] 确定性换档成功！精准进入【{names.get(target_mode, target_mode)}】！")
@@ -338,7 +392,8 @@ def switch_to_mode(target_mode):
             print(f"[模式切换] 触发闭环微调补正: 补点 {needed_fix} 次")
             for i in range(needed_fix):
                 click_cef_button(cx, cy)
-                time.sleep(0.35)
+                time.sleep(0.55)
+            time.sleep(0.3)
             current = detect_play_mode(target_hwnd, w, h)
 
         print(f"[模式切换] 最终复验模式: 【{names.get(current, current)}】")
@@ -347,54 +402,103 @@ def switch_to_mode(target_mode):
         return current
 
 class SingleSongLoopManager:
-    """管理单曲自动循环重播助手状态与定时器"""
+    """
+    新一代双核智能单曲循环引擎 (Dual-Core Seamless Looper):
+    解决网易云音乐桌面端在特定歌单/私人FM/动态推荐/心动模式下单曲循环失效跳下一首的核心痛点：
+    1. 前瞻式平滑重播 (Proactive Seamless Looper): 进度条达 98.2% 时在跳歌前主动无缝回弹 0:00，零卡顿零杂音。
+    2. 反应式保底哨兵 (Reactive Guard): 毫秒级监控曲目标题，若网易云异常跳歌，立即自动无缝拉回上一首。
+    3. 智能人工意图识别: 用户手动在手机遥控或电脑切歌时，自动接纳新曲目为新循环目标，绝不阻碍正常切歌。
+    """
     def __init__(self):
         self.enabled = False
-        self.interval = 210  # 默认 210 秒（约 3.5 分钟）自动触发一次重播
-        self.timer_thread = None
+        self.target_song = ""
+        self.interval = 0
+        self.last_manual_switch_time = 0
+        self.worker_thread = None
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
+        self.start_worker()
 
-    def toggle(self):
-        with self.lock:
-            self.enabled = not self.enabled
-            if self.enabled:
-                self.start_timer()
-            else:
-                self.stop_timer()
-            return self.enabled
+    def notify_manual_switch(self):
+        """用户主动执行了上一首/下一首操作，授予 3.5 秒人工切歌保护期并更新循环锚点"""
+        self.last_manual_switch_time = time.time()
+        def _update():
+            time.sleep(1.0)
+            new_s = get_current_song()
+            if new_s and new_s not in ("网易云音乐", "OrpheusBrowserHost"):
+                self.target_song = new_s
+                print(f"[智能单曲循环引擎] 用户手动切歌，循环目标曲目已更新为: 【{self.target_song}】")
+        threading.Thread(target=_update, daemon=True).start()
 
     def set_state(self, state, interval=None):
         with self.lock:
             self.enabled = bool(state)
-            if interval:
-                try:
-                    self.interval = max(30, int(interval))
-                except ValueError:
-                    pass
             if self.enabled:
-                self.start_timer()
+                cur = get_current_song()
+                if cur and cur not in ("网易云音乐", "OrpheusBrowserHost"):
+                    self.target_song = cur
+                print(f"[智能单曲循环引擎] 已开启！持续循环锁定曲目: 【{self.target_song}】")
             else:
-                self.stop_timer()
+                print("[智能单曲循环引擎] 已关闭")
             return self.enabled
 
-    def start_timer(self):
-        self.stop_event.clear()
-        if self.timer_thread and self.timer_thread.is_alive():
-            return
-        self.timer_thread = threading.Thread(target=self._loop_worker, daemon=True)
-        self.timer_thread.start()
+    def toggle(self):
+        return self.set_state(not self.enabled)
 
-    def stop_timer(self):
-        self.stop_event.set()
+    def start_worker(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            return
+        self.stop_event.clear()
+        self.worker_thread = threading.Thread(target=self._loop_worker, daemon=True)
+        self.worker_thread.start()
 
     def _loop_worker(self):
+        last_prog_check = 0
         while not self.stop_event.is_set():
-            if self.stop_event.wait(timeout=self.interval):
-                break
-            if self.enabled:
-                print(f"[单曲循环助手] 达到循环周期 ({self.interval}秒)，自动触发单曲重播！")
-                MusicBox.replay_song()
+            time.sleep(0.20)
+            if not self.enabled:
+                continue
+
+            # 暂停时不触发重播
+            if not is_playing():
+                continue
+
+            now = time.time()
+            # 人工手动切歌保护期
+            if now - self.last_manual_switch_time < 3.5:
+                continue
+
+            current = get_current_song()
+            if not current or current in ("网易云音乐", "OrpheusBrowserHost"):
+                continue
+
+            # 首次记录目标曲目
+            if not self.target_song:
+                self.target_song = current
+                continue
+
+            # 1. 反应式保底哨兵 (Reactive Guard):
+            # 若曲目已被网易云换档至下一首，立即强力无缝拉回上一首并从 0:00 播放
+            if current != self.target_song:
+                print(f"[智能单曲循环引擎] 监测到曲目自然结束并跳转至【{current}】，立即自动无缝拉回【{self.target_song}】！")
+                MusicBox.prev_song_internal()
+                time.sleep(0.3)
+                MusicBox.seek_to_start()
+                time.sleep(1.2)
+                self.target_song = get_current_song()
+                continue
+
+            # 2. 前瞻式平滑重播引擎 (Proactive Seamless Looper):
+            # 每 0.6 秒扫描一次播放进度条尾部 (98.2%)。
+            # 若接近播放尾声，提前回弹 0:00，彻底避免跳歌闪烁
+            if now - last_prog_check >= 0.6:
+                last_prog_check = now
+                target_hwnd, _, w, h = get_orpheus_window()
+                if target_hwnd and w > 0:
+                    if is_progress_near_end(target_hwnd, w, h):
+                        print(f"[智能单曲循环引擎] 曲目【{self.target_song}】进度已达 98.2%，主动注入 0:00 无缝从头重播！")
+                        MusicBox.seek_to_start()
+                        time.sleep(2.5) # 避开重播前 2.5 秒，防止重复触发
 
 loop_manager = SingleSongLoopManager()
 
@@ -403,8 +507,29 @@ current_play_mode = "list_loop"
 
 class MusicBox:
     @staticmethod
+    def seek_to_start():
+        """将当前曲目瞬间无缝拉回 0:00"""
+        target, render, w, h = get_orpheus_window()
+        if render and w > 0:
+            click_cef_button(20, h - 82)
+        else:
+            press_media_key(VK_MEDIA_PREV_TRACK)
+            time.sleep(0.12)
+            press_media_key(VK_MEDIA_PREV_TRACK)
+
+    @staticmethod
+    def prev_song_internal():
+        """底层无感切回上一首，不刷新 manual switch 标记"""
+        target, render, w, h = get_orpheus_window()
+        if render and w > 0:
+            click_cef_button(w // 2 - 50, h - 41)
+        else:
+            press_media_key(VK_MEDIA_PREV_TRACK)
+
+    @staticmethod
     def next_song():
         print("[操作触发] 下一首 (Next Track)")
+        loop_manager.notify_manual_switch()
         target, render, w, h = get_orpheus_window()
         if render and w > 0:
             click_cef_button(w // 2 + 50, h - 41)
@@ -414,6 +539,7 @@ class MusicBox:
     @staticmethod
     def prev_song():
         print("[操作触发] 上一首 (Previous Track)")
+        loop_manager.notify_manual_switch()
         target, render, w, h = get_orpheus_window()
         if render and w > 0:
             click_cef_button(w // 2 - 50, h - 41)
@@ -433,17 +559,9 @@ class MusicBox:
 
     @staticmethod
     def replay_song():
-        """重播本首：两次点击上一首，网易云将立即从 0:00 重新播放当前曲目"""
+        """从头重播当前曲目"""
         print("[操作触发] 重新播放本首 (Replay from 0:00)")
-        target, render, w, h = get_orpheus_window()
-        if render and w > 0:
-            click_cef_button(w // 2 - 50, h - 41)
-            time.sleep(0.12)
-            click_cef_button(w // 2 - 50, h - 41)
-        else:
-            press_media_key(VK_MEDIA_PREV_TRACK)
-            time.sleep(0.12)
-            press_media_key(VK_MEDIA_PREV_TRACK)
+        MusicBox.seek_to_start()
 
     @staticmethod
     def toggle_loop():
@@ -455,9 +573,9 @@ class MusicBox:
 
     @staticmethod
     def set_mode(mode_name):
-        """设置特定的播放模式（通过视觉闭环自动换档到位）"""
+        """设置特定的播放模式（通过视觉闭环自动换档到位，并联动智能循环引擎）"""
         res = switch_to_mode(mode_name)
-        if mode_name == "single_loop":
+        if mode_name == "single_loop" or res == "single_loop":
             loop_manager.set_state(True)
         else:
             loop_manager.set_state(False)
@@ -916,6 +1034,13 @@ def main():
     print("  * 睡眠定时关机 (15/30/45/60分钟 / 取消)")
     print("  * 双通道按键注入：网易云全局热键 + Windows多媒体硬件键")
     print("正在监听手机指令...\n")
+    try:
+        init_mode = detect_play_mode()
+        if init_mode == "single_loop":
+            loop_manager.set_state(True)
+    except Exception:
+        pass
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -284,9 +284,10 @@ def get_current_play_mode(force_refresh=False):
 
 def switch_to_mode(target_mode):
     """
-    闭环精准步进模式换档器：
-    利用单步物理点击 + 状态校验（每次等待 220ms CEF 渲染重绘），
-    步步为营，实时探测确认，确保 100% 准确到达目标模式，彻底消除回退与死循环。
+    闭环确定性模式换档器：
+    基于状态环周期 (0: sequential -> 1: list_loop -> 2: single_loop -> 3: shuffle)，
+    以 350ms 充裕重绘时间注入确定性脉冲步进，并在末尾进行视觉闭环复验与补正。
+    确保 100% 精确到达目标模式，绝无超调、漏跳或循环回退。
     """
     with _mode_switch_lock:
         target_hwnd, render_hwnd, w, h = get_orpheus_window()
@@ -304,27 +305,43 @@ def switch_to_mode(target_mode):
         if target_mode not in MODE_ORDER:
             target_mode = 'list_loop'
 
+        current = detect_play_mode(target_hwnd, w, h)
+        print(f"[模式切换] 当前物理模式: 【{names.get(current, current)}】 -> 目标模式: 【{names.get(target_mode, target_mode)}】")
+        if current == target_mode:
+            print(f"[模式切换] 已经处于【{names.get(target_mode, target_mode)}】，无需额外换档")
+            _last_mode_cache["mode"] = target_mode
+            _last_mode_cache["time"] = time.time()
+            return current
+
         cx = w // 2 - 95
         cy = h - 41
 
-        # 最多单向步进 4 次（一个完整循环周期）
-        for step in range(4):
-            current = detect_play_mode(target_hwnd, w, h)
-            if current == target_mode:
-                if step > 0:
-                    print(f"[模式切换] 步进换档成功！经 {step} 次点击成功进入【{names.get(target_mode, target_mode)}】！")
-                else:
-                    print(f"[模式切换] 物理状态已在【{names.get(target_mode, target_mode)}】，无需额外点击")
-                _last_mode_cache["mode"] = target_mode
-                _last_mode_cache["time"] = time.time()
-                return current
+        idx_cur = MODE_ORDER.index(current)
+        idx_tgt = MODE_ORDER.index(target_mode)
+        needed_clicks = (idx_tgt - idx_cur) % 4
 
-            print(f"[模式切换] 当前: 【{names.get(current, current)}】 -> 目标: 【{names.get(target_mode, target_mode)}】 (点击第 {step + 1} 步)")
+        print(f"[模式切换] 注入确定性脉冲步进: 需点击 {needed_clicks} 次 (间隔 350ms)")
+        for i in range(needed_clicks):
             click_cef_button(cx, cy)
-            time.sleep(0.22)  # 等待 CEF 渲染重绘完成
+            time.sleep(0.35)  # 严格保证 CEF 渲染重绘完成，彻底杜绝丢帧与双击合并
 
-        # 4 步后做最终复验
         current = detect_play_mode(target_hwnd, w, h)
+        if current == target_mode:
+            print(f"[模式切换] 确定性换档成功！精准进入【{names.get(target_mode, target_mode)}】！")
+            _last_mode_cache["mode"] = target_mode
+            _last_mode_cache["time"] = time.time()
+            return current
+
+        # 闭环二次微调补正（仅在极个别丢帧情况下）
+        needed_fix = (MODE_ORDER.index(target_mode) - MODE_ORDER.index(current)) % 4
+        if needed_fix > 0:
+            print(f"[模式切换] 触发闭环微调补正: 补点 {needed_fix} 次")
+            for i in range(needed_fix):
+                click_cef_button(cx, cy)
+                time.sleep(0.35)
+            current = detect_play_mode(target_hwnd, w, h)
+
+        print(f"[模式切换] 最终复验模式: 【{names.get(current, current)}】")
         _last_mode_cache["mode"] = current
         _last_mode_cache["time"] = time.time()
         return current

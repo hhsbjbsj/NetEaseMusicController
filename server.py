@@ -30,6 +30,7 @@ except Exception:
 
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
+winmm = ctypes.windll.winmm
 
 # Virtual Key Codes
 VK_CONTROL = 0x11
@@ -79,6 +80,81 @@ def press_media_key(media_vk):
     user32.keybd_event(media_vk, scan, KEYEVENTF_EXTENDEDKEY, 0)
     time.sleep(0.06)
     user32.keybd_event(media_vk, scan, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+
+def press_clean_media_key(vk):
+    """发送纯净多媒体硬件按键脉冲（bScan=0，规避非标准映射码污染）"""
+    user32.keybd_event(vk, 0, KEYEVENTF_EXTENDEDKEY, 0)
+    time.sleep(0.04)
+    user32.keybd_event(vk, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+
+def get_sys_wave_volume():
+    """获取系统 WaveOut 底层音量百分比 (0-100)"""
+    try:
+        vol = wintypes.DWORD()
+        res = winmm.waveOutGetVolume(0, ctypes.byref(vol))
+        if res == 0:
+            left = vol.value & 0xFFFF
+            return max(0, min(100, round((left / 65535.0) * 100)))
+    except Exception:
+        pass
+    return 100
+
+def set_sys_wave_volume(pct):
+    """向系统所有底层音频输出设备写入统一音量 (0-100)"""
+    pct = max(0, min(100, int(pct)))
+    val = int(pct * 65535 / 100) & 0xFFFF
+    dw_vol = (val << 16) | val
+    try:
+        num = winmm.waveOutGetNumDevs()
+        for i in range(num):
+            winmm.waveOutSetVolume(i, dw_vol)
+    except Exception:
+        pass
+    return pct
+
+_volume_state = {
+    "volume": get_sys_wave_volume(),
+    "is_muted": False,
+    "last_vol": get_sys_wave_volume() or 100
+}
+
+_last_mute_cache = {"is_muted": False, "time": 0}
+
+def is_audio_muted(target=None, w=None, h=None, force_refresh=False):
+    """精准探测网易云底栏喇叭图标当前是否处于静音 X 态（带 1 秒 TTL 缓存）"""
+    now = time.time()
+    if not force_refresh and (now - _last_mute_cache["time"] < 1.0):
+        return _last_mute_cache["is_muted"]
+
+    try:
+        if not target:
+            target, _, w, h = get_orpheus_window()
+        if not target or w < 300 or h < 200:
+            return _volume_state.get("is_muted", False)
+
+        hwndDC = user32.GetWindowDC(target)
+        mfcDC = gdi32.CreateCompatibleDC(hwndDC)
+        saveBitMap = gdi32.CreateCompatibleBitmap(hwndDC, w, h)
+        gdi32.SelectObject(mfcDC, saveBitMap)
+        user32.PrintWindow(target, mfcDC, 2)
+
+        bg_r = gdi32.GetPixel(mfcDC, 20, h - 15) & 0xFF
+        is_dark = (bg_r < 100)
+        c = gdi32.GetPixel(mfcDC, w - 74, h - 41)
+        r = c & 0xFF
+
+        gdi32.DeleteObject(saveBitMap)
+        gdi32.DeleteDC(mfcDC)
+        user32.ReleaseDC(target, hwndDC)
+
+        muted = (r > 60) if is_dark else (r < 160)
+        _volume_state["is_muted"] = muted
+        _last_mute_cache["is_muted"] = muted
+        _last_mute_cache["time"] = now
+        return muted
+    except Exception:
+        return _volume_state.get("is_muted", False)
+
 
 def get_orpheus_window():
     """获取网易云主窗口及渲染子窗口的真实句柄与尺寸"""
@@ -734,19 +810,105 @@ class MusicBox:
             return False
 
     @staticmethod
-    def volume_up():
-        print("[操作触发] 音量+ (Volume Up)")
-        press_media_key(VK_VOLUME_UP)
-
-    @staticmethod
-    def volume_down():
-        print("[操作触发] 音量- (Volume Down)")
-        press_media_key(VK_VOLUME_DOWN)
-
-    @staticmethod
     def volume_mute():
-        print("[操作触发] 静音切换 (Mute)")
-        press_media_key(VK_VOLUME_MUTE)
+        """静音切换（网易云底栏喇叭物理静音 + 系统底层 WaveOut 音量双通道联动）"""
+        print("[操作触发] 静音切换 (Mute Toggle)")
+        target, render, w, h = get_orpheus_window()
+        cur_muted = is_audio_muted(target, w, h)
+
+        # 1. 物理点击网易云底栏喇叭图标翻转静音
+        if target and render:
+            click_cef_button(w - 82, h - 41)
+            time.sleep(0.35)
+            new_muted = is_audio_muted(target, w, h)
+        else:
+            new_muted = not cur_muted
+
+        # 2. Windows WaveOut 音量联动
+        if new_muted:
+            _volume_state["last_vol"] = _volume_state.get("volume", 100) or 100
+            set_sys_wave_volume(0)
+        else:
+            last = _volume_state.get("last_vol", 100) or 80
+            set_sys_wave_volume(last)
+            _volume_state["volume"] = last
+
+        # 3. 广播纯净 Windows 硬件静音按键
+        press_clean_media_key(VK_VOLUME_MUTE)
+
+        _volume_state["is_muted"] = new_muted
+        print(f"[静音结果] 状态: {'已静音' if new_muted else '已取消静音'}")
+        return new_muted
+
+    @staticmethod
+    def volume_up(step=5):
+        """音量+（调大音量并自动解除静音）"""
+        target, render, w, h = get_orpheus_window()
+        if is_audio_muted(target, w, h, force_refresh=True):
+            if target and render:
+                click_cef_button(w - 82, h - 41)
+                time.sleep(0.2)
+
+        cur_vol = _volume_state.get("volume", get_sys_wave_volume())
+        new_vol = min(100, cur_vol + step)
+        _volume_state["volume"] = new_vol
+        _volume_state["is_muted"] = False
+
+        set_sys_wave_volume(new_vol)
+        press_clean_media_key(VK_VOLUME_UP)
+        print(f"[操作触发] 音量+ (Volume Up) -> {new_vol}%")
+        return new_vol
+
+    @staticmethod
+    def volume_down(step=5):
+        """音量-（调小音量）"""
+        target, render, w, h = get_orpheus_window()
+        cur_vol = _volume_state.get("volume", get_sys_wave_volume())
+        new_vol = max(0, cur_vol - step)
+        _volume_state["volume"] = new_vol
+
+        set_sys_wave_volume(new_vol)
+        press_clean_media_key(VK_VOLUME_DOWN)
+
+        if new_vol == 0:
+            if not is_audio_muted(target, w, h, force_refresh=True):
+                if target and render:
+                    click_cef_button(w - 82, h - 41)
+            _volume_state["is_muted"] = True
+        else:
+            if is_audio_muted(target, w, h, force_refresh=True):
+                if target and render:
+                    click_cef_button(w - 82, h - 41)
+                    time.sleep(0.2)
+            _volume_state["is_muted"] = False
+
+        print(f"[操作触发] 音量- (Volume Down) -> {new_vol}%")
+        return new_vol
+
+    @staticmethod
+    def set_volume(target_vol):
+        """设定指定音量 (0-100)"""
+        try:
+            val = int(target_vol)
+        except (ValueError, TypeError):
+            val = 50
+        val = max(0, min(100, val))
+        target, render, w, h = get_orpheus_window()
+
+        if val > 0 and is_audio_muted(target, w, h, force_refresh=True):
+            if target and render:
+                click_cef_button(w - 82, h - 41)
+                time.sleep(0.2)
+        elif val == 0 and not is_audio_muted(target, w, h, force_refresh=True):
+            if target and render:
+                click_cef_button(w - 82, h - 41)
+                time.sleep(0.2)
+
+        _volume_state["volume"] = val
+        _volume_state["is_muted"] = (val == 0)
+        set_sys_wave_volume(val)
+        print(f"[操作触发] 设定音量为: {val}%")
+        return val
 
     @staticmethod
     def schedule_shutdown(minutes=30):
@@ -971,7 +1133,7 @@ class MusicHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
 
-        # 1. 实时状态查询接口（含当前歌曲、播放模式、播放状态、喜欢状态）
+        # 1. 实时状态查询接口（含当前歌曲、播放模式、播放状态、喜欢状态、音量信息）
         if path == "/api/status":
             actual_mode = get_current_play_mode()
             self.send_cors_json({
@@ -981,6 +1143,8 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "play_mode": actual_mode,
                 "is_playing": is_playing(),
                 "is_liked": is_song_liked(),
+                "volume": _volume_state.get("volume", 100),
+                "is_muted": is_audio_muted(),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled),
                 "loop_interval": loop_manager.interval,
                 "local_ip": get_local_ip(),
@@ -1008,6 +1172,8 @@ class MusicHandler(BaseHTTPRequestHandler):
                         "play_mode": actual_mode,
                         "is_playing": is_playing(),
                         "is_liked": is_song_liked(),
+                        "volume": _volume_state.get("volume", 100),
+                        "is_muted": _volume_state.get("is_muted", False),
                         "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
                     })
                     return
@@ -1018,6 +1184,9 @@ class MusicHandler(BaseHTTPRequestHandler):
             elif cmd == "set_loop":
                 state = query.get("state", ["true"])[0].lower() in ("true", "1")
                 loop_manager.set_state(state, val)
+            elif cmd == "set_volume":
+                res = MusicBox.set_volume(val or 50)
+                msg = f"音量已设为 {res}%"
             elif cmd == "schedule_shutdown":
                 MusicBox.schedule_shutdown(val or 30)
             elif cmd and hasattr(MusicBox, cmd):
@@ -1026,6 +1195,10 @@ class MusicHandler(BaseHTTPRequestHandler):
                     msg = "enabled" if res else "disabled"
                 elif cmd == "like_song":
                     msg = "已添加到我喜欢的音乐" if res else "已取消喜欢"
+                elif cmd == "volume_mute":
+                    msg = "已开启静音" if res else "已取消静音"
+                elif cmd in ("volume_up", "volume_down"):
+                    msg = f"当前音量: {res}%"
             else:
                 success = False
                 msg = f"Unknown command: {cmd}"
@@ -1038,6 +1211,8 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "play_mode": actual_mode,
                 "is_playing": is_playing(),
                 "is_liked": is_song_liked(force_refresh=(cmd == "like_song")),
+                "volume": _volume_state.get("volume", 100),
+                "is_muted": _volume_state.get("is_muted", False),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
             })
             return
@@ -1055,6 +1230,8 @@ class MusicHandler(BaseHTTPRequestHandler):
                 "play_mode": actual_mode,
                 "is_playing": is_playing(),
                 "is_liked": is_song_liked(),
+                "volume": _volume_state.get("volume", 100),
+                "is_muted": is_audio_muted(),
                 "single_loop": (actual_mode == "single_loop" or loop_manager.enabled)
             })
             return

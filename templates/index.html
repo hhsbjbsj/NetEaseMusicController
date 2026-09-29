@@ -320,40 +320,142 @@
       filter: drop-shadow(0 0 8px rgba(255, 71, 87, 0.7));
     }
 
-    /* 音量控制 */
-    .volume-controls {
+    /* 音量控制卡片 */
+    .volume-card {
+      background: rgba(0, 0, 0, 0.25);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .vol-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
-      background: rgba(0, 0, 0, 0.25);
-      padding: 10px 14px;
-      border-radius: 14px;
-      border: 1px solid var(--border);
     }
 
-    .vol-btn {
-      background: var(--bg-card-hover);
-      border: 1px solid var(--border);
-      color: var(--text-main);
-      width: 42px;
-      height: 42px;
-      border-radius: 10px;
+    .vol-title-wrap {
       display: flex;
       align-items: center;
-      justify-content: center;
-      font-size: 18px;
-      cursor: pointer;
+      gap: 6px;
     }
 
-    .vol-btn:active {
-      transform: scale(0.92);
+    .vol-icon {
+      font-size: 15px;
     }
 
     .vol-title {
       font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .vol-percent-badge {
+      font-size: 12px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 8px;
+      background: rgba(0, 210, 211, 0.12);
+      color: #00d2d3;
+      border: 1px solid rgba(0, 210, 211, 0.35);
+      transition: all 0.25s ease;
+    }
+
+    .vol-percent-badge.muted {
+      color: #ff4757;
+      background: rgba(255, 71, 87, 0.18);
+      border-color: rgba(255, 71, 87, 0.5);
+    }
+
+    .vol-slider-wrap {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      padding: 4px 0;
+    }
+
+    .vol-slider {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: linear-gradient(to right, #00d2d3 0%, rgba(255, 255, 255, 0.15) 0%);
+      outline: none;
+      cursor: pointer;
+    }
+
+    .vol-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #ffffff;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 6px rgba(0, 210, 211, 0.8);
+      transition: transform 0.12s;
+    }
+
+    .vol-slider::-webkit-slider-thumb:active {
+      transform: scale(1.2);
+    }
+
+    .vol-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .vol-step-btn {
+      flex: 1;
+      background: var(--bg-card-hover);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      padding: 8px 4px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
       font-weight: 500;
-      color: var(--text-sub);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .vol-step-btn:active {
+      transform: scale(0.93);
+      background: rgba(255, 255, 255, 0.15);
+    }
+
+    .vol-mute-btn {
+      flex: 1.2;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      padding: 8px 4px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .vol-mute-btn.muted {
+      background: rgba(255, 71, 87, 0.2);
+      border-color: rgba(255, 71, 87, 0.55);
+      color: #ff6b81;
+      box-shadow: 0 2px 12px rgba(255, 71, 87, 0.3);
+    }
+
+    .vol-mute-btn:active {
+      transform: scale(0.93);
     }
 
     /* 睡眠关机卡片 */
@@ -527,12 +629,26 @@
         </button>
       </div>
 
-      <!-- 音量控制 -->
-      <div class="volume-controls">
-        <button class="vol-btn" onclick="doAction('volume_down', '🔉 音量 -')">🔉-</button>
-        <span class="vol-title">音量控制</span>
-        <button class="vol-btn" onclick="doAction('volume_mute', '🔇 静音切换')">🔇</button>
-        <button class="vol-btn" onclick="doAction('volume_up', '🔊 音量 +')">🔊+</button>
+      <!-- 音量控制卡片 -->
+      <div class="volume-card">
+        <div class="vol-header">
+          <div class="vol-title-wrap">
+            <span class="vol-icon" id="vol-header-icon">🔊</span>
+            <span class="vol-title">播放与系统音量</span>
+          </div>
+          <span class="vol-percent-badge" id="vol-percent-badge">100%</span>
+        </div>
+        <div class="vol-slider-wrap">
+          <input type="range" id="vol-slider" class="vol-slider" min="0" max="100" value="100" oninput="onVolumeSliderInput(this.value)" onchange="onVolumeSliderChange(this.value)">
+        </div>
+        <div class="vol-actions">
+          <button class="vol-step-btn" onclick="adjustVolume(-5)">🔉 -5%</button>
+          <button id="btn-vol-mute" class="vol-mute-btn" onclick="toggleMute()">
+            <span id="vol-mute-icon">🔇</span>
+            <span id="vol-mute-text">静音</span>
+          </button>
+          <button class="vol-step-btn" onclick="adjustVolume(5)">🔊 +5%</button>
+        </div>
       </div>
     </div>
 
@@ -615,6 +731,7 @@
           if (data.current_song) updateSongTitle(data.current_song);
           if (typeof data.is_playing === 'boolean') updatePlayingUI(data.is_playing);
           if (typeof data.is_liked === 'boolean') updateLikedUI(data.is_liked);
+          if (typeof data.volume === 'number') updateVolumeUI(data.volume, data.is_muted);
           if (Date.now() > _modeSwitchLockUntil && data.play_mode) {
             updateModeUI(data.play_mode);
           }
@@ -774,6 +891,7 @@
           updateSongTitle(data.current_song);
           if (typeof data.is_playing === 'boolean') updatePlayingUI(data.is_playing);
           if (typeof data.is_liked === 'boolean') updateLikedUI(data.is_liked);
+          if (typeof data.volume === 'number') updateVolumeUI(data.volume, data.is_muted);
           // 仅在用户未进行手动模式换档期间同步物理模式
           if (Date.now() > _modeSwitchLockUntil && data.play_mode) {
             updateModeUI(data.play_mode);
@@ -808,6 +926,113 @@
             }
           }
         });
+    }
+
+    // 音量与静音交互
+    let _volLockUntil = 0;
+
+    function updateVolumeUI(vol, isMuted) {
+      if (typeof vol === 'number') {
+        const slider = document.getElementById('vol-slider');
+        const badge = document.getElementById('vol-percent-badge');
+        const headerIcon = document.getElementById('vol-header-icon');
+
+        if (slider && Date.now() > _volLockUntil) {
+          slider.value = vol;
+          slider.style.background = `linear-gradient(to right, #00d2d3 ${vol}%, rgba(255, 255, 255, 0.15) ${vol}%)`;
+        }
+
+        if (badge) {
+          if (isMuted) {
+            badge.innerText = '已静音';
+            badge.classList.add('muted');
+          } else {
+            badge.innerText = vol + '%';
+            badge.classList.remove('muted');
+          }
+        }
+
+        if (headerIcon) {
+          headerIcon.innerText = isMuted ? '🔇' : (vol === 0 ? '🔈' : (vol < 50 ? '🔉' : '🔊'));
+        }
+      }
+
+      if (typeof isMuted === 'boolean') {
+        const muteBtn = document.getElementById('btn-vol-mute');
+        const muteIcon = document.getElementById('vol-mute-icon');
+        const muteText = document.getElementById('vol-mute-text');
+        if (muteBtn && muteIcon && muteText) {
+          if (isMuted) {
+            muteBtn.classList.add('muted');
+            muteIcon.innerText = '🔈';
+            muteText.innerText = '已静音';
+          } else {
+            muteBtn.classList.remove('muted');
+            muteIcon.innerText = '🔇';
+            muteText.innerText = '静音';
+          }
+        }
+      }
+    }
+
+    function onVolumeSliderInput(val) {
+      _volLockUntil = Date.now() + 2000;
+      const slider = document.getElementById('vol-slider');
+      const badge = document.getElementById('vol-percent-badge');
+      if (slider) {
+        slider.style.background = `linear-gradient(to right, #00d2d3 ${val}%, rgba(255, 255, 255, 0.15) ${val}%)`;
+      }
+      if (badge) {
+        badge.innerText = val + '%';
+        badge.classList.remove('muted');
+      }
+    }
+
+    function onVolumeSliderChange(val) {
+      _volLockUntil = Date.now() + 2500;
+      vibrate(30);
+      fetch('/api/action?cmd=set_volume&val=' + val)
+        .then(res => res.json())
+        .then(data => {
+          updateVolumeUI(data.volume, data.is_muted);
+          showToast(`音量已调整为 ${val}%`);
+        })
+        .catch(() => showToast('音量调整失败'));
+    }
+
+    function adjustVolume(step) {
+      vibrate(30);
+      _volLockUntil = Date.now() + 2000;
+      const cmd = step > 0 ? 'volume_up' : 'volume_down';
+      fetch('/api/action?cmd=' + cmd)
+        .then(res => res.json())
+        .then(data => {
+          updateVolumeUI(data.volume, data.is_muted);
+          if (typeof data.volume === 'number') {
+            showToast(`音量：${data.volume}%`);
+          }
+        })
+        .catch(() => showToast('音量调整失败'));
+    }
+
+    function toggleMute() {
+      vibrate(40);
+      _volLockUntil = Date.now() + 2000;
+      const muteBtn = document.getElementById('btn-vol-mute');
+      const currentlyMuted = muteBtn ? muteBtn.classList.contains('muted') : false;
+      updateVolumeUI(undefined, !currentlyMuted);
+
+      fetch('/api/action?cmd=volume_mute')
+        .then(res => res.json())
+        .then(data => {
+          updateVolumeUI(data.volume, data.is_muted);
+          if (data.is_muted) {
+            showToast('🔇 已开启静音');
+          } else {
+            showToast('🔊 已恢复声音 (' + data.volume + '%)');
+          }
+        })
+        .catch(() => showToast('静音切换失败'));
     }
 
     syncStatus();

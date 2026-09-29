@@ -627,6 +627,7 @@
         .then(data => {
           if (data.play_mode) {
             updateModeUI(data.play_mode);
+            _modeSwitchLockUntil = Date.now() + 1500;
           }
         })
         .catch(() => showToast('切换模式失败，请重试'))

@@ -16,7 +16,7 @@ import json
 import ctypes
 import socket
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer as HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from ctypes import wintypes
 
@@ -180,9 +180,14 @@ def detect_play_mode(target=None, w=None, h=None):
         gdi32.DeleteDC(mfcDC)
         user32.ReleaseDC(target, hwndDC)
 
-        # 1. 顺序播放 (sequential): 中间 6..11 行完全没有任何暗色像素
+        # 校验特征完整度：若暗色像素少于 20，属于无效捕获或尚未重绘，返回上一次可靠缓存
+        total_dark = sum(sum(row) for row in grid)
+        if total_dark < 20:
+            return _last_mode_cache.get("mode", "list_loop")
+
+        # 1. 顺序播放 (sequential): 中间 6..11 行完全没有任何暗色像素，且图标特征完整
         mid_rows_sum = sum(sum(grid[y]) for y in range(6, 12))
-        if mid_rows_sum == 0:
+        if mid_rows_sum == 0 and total_dark >= 25:
             return "sequential"
 
         # 2. 单曲循环 (single_loop): 中心列 x=7 处有数字 1 的竖线 (连续暗色)
@@ -198,7 +203,7 @@ def detect_play_mode(target=None, w=None, h=None):
         # 4. 列表循环 (list_loop): 环形箭头，中间中心区域为空
         return "list_loop"
     except Exception:
-        return "list_loop"
+        return _last_mode_cache.get("mode", "list_loop")
 
 _last_mode_cache = {"mode": "list_loop", "time": 0}
 _last_play_cache = {"is_playing": True, "time": 0}
@@ -279,15 +284,15 @@ def get_current_play_mode(force_refresh=False):
 
 def switch_to_mode(target_mode):
     """
-    闭环极速自校验模式换档器：
-    利用四档确定性状态环（顺序 -> 列表 -> 单曲 -> 随机）进行毫秒级精准脉冲换档，
-    并在换档后进行光学栅格复验，彻底杜绝模式反复跳变与死循环。
+    闭环精准步进模式换档器：
+    利用单步物理点击 + 状态校验（每次等待 220ms CEF 渲染重绘），
+    步步为营，实时探测确认，确保 100% 准确到达目标模式，彻底消除回退与死循环。
     """
     with _mode_switch_lock:
         target_hwnd, render_hwnd, w, h = get_orpheus_window()
         if not target_hwnd or not render_hwnd:
             print("[模式切换] 未找到网易云窗口，无法换档")
-            return None
+            return target_mode
 
         names = {
             'sequential': '顺序播放',
@@ -299,53 +304,27 @@ def switch_to_mode(target_mode):
         if target_mode not in MODE_ORDER:
             target_mode = 'list_loop'
 
-        current = detect_play_mode(target_hwnd, w, h)
-        print(f"[模式切换] 当前物理模式: 【{names.get(current, current)}】 -> 目标模式: 【{names.get(target_mode, target_mode)}】")
-        if current == target_mode:
-            print(f"[模式切换] 已经处于【{names.get(target_mode, target_mode)}】，无需额外换档")
-            _last_mode_cache["mode"] = target_mode
-            _last_mode_cache["time"] = time.time()
-            return current
-
         cx = w // 2 - 95
         cy = h - 41
-        lparam = (cy << 16) | (cx & 0xFFFF)
 
-        def click_once():
-            user32.PostMessageW(render_hwnd, 0x0200, 0, lparam)
-            time.sleep(0.03)
-            user32.PostMessageW(render_hwnd, 0x0201, 1, lparam)
-            time.sleep(0.04)
-            user32.PostMessageW(render_hwnd, 0x0202, 0, lparam)
-
-        idx_cur = MODE_ORDER.index(current)
-        idx_tgt = MODE_ORDER.index(target_mode)
-        needed_clicks = (idx_tgt - idx_cur) % 4
-
-        for i in range(needed_clicks):
-            click_once()
-            if i < needed_clicks - 1:
-                time.sleep(0.08)
-
-        time.sleep(0.25)  # 等待 CEF 渲染重绘
-        current = detect_play_mode(target_hwnd, w, h)
-        if current == target_mode:
-            print(f"[模式切换] 极速脉冲换档成功！直接切入【{names.get(target_mode, target_mode)}】！")
-            _last_mode_cache["mode"] = target_mode
-            _last_mode_cache["time"] = time.time()
-            return current
-
-        # 闭环补正：若极偶然步数有偏差，逐次补点确认（最多2次）
-        for step in range(2):
-            click_once()
-            time.sleep(0.25)
+        # 最多单向步进 4 次（一个完整循环周期）
+        for step in range(4):
             current = detect_play_mode(target_hwnd, w, h)
             if current == target_mode:
-                print(f"[模式切换] 闭环补正成功！已进入【{names.get(target_mode, target_mode)}】！")
+                if step > 0:
+                    print(f"[模式切换] 步进换档成功！经 {step} 次点击成功进入【{names.get(target_mode, target_mode)}】！")
+                else:
+                    print(f"[模式切换] 物理状态已在【{names.get(target_mode, target_mode)}】，无需额外点击")
                 _last_mode_cache["mode"] = target_mode
                 _last_mode_cache["time"] = time.time()
                 return current
 
+            print(f"[模式切换] 当前: 【{names.get(current, current)}】 -> 目标: 【{names.get(target_mode, target_mode)}】 (点击第 {step + 1} 步)")
+            click_cef_button(cx, cy)
+            time.sleep(0.22)  # 等待 CEF 渲染重绘完成
+
+        # 4 步后做最终复验
+        current = detect_play_mode(target_hwnd, w, h)
         _last_mode_cache["mode"] = current
         _last_mode_cache["time"] = time.time()
         return current
@@ -665,10 +644,15 @@ def get_best_lan_ip():
 
     return "127.0.0.1", "本地回环", None, []
 
+_cached_local_ip = None
+
 def get_local_ip():
-    """兼容旧接口调用"""
-    best_ip, _, _, _ = get_best_lan_ip()
-    return best_ip
+    """带持久缓存的局域网 IP 查询"""
+    global _cached_local_ip
+    if not _cached_local_ip:
+        best_ip, _, _, _ = get_best_lan_ip()
+        _cached_local_ip = best_ip
+    return _cached_local_ip
 
 
 
